@@ -1,0 +1,43 @@
+{
+  "id": "order_v1",
+  "name": "Sample Order Fulfillment",
+  "description": "Order placed -> payment -> inventory check -> shipping -> confirmation",
+  "tasks": [
+    {
+      "id": "order_received",
+      "type": "log",
+      "params": { "message": "Order received" },
+      "dependsOn": []
+    },
+    {
+      "id": "process_payment",
+      "type": "http",
+      "params": { "url": "http://localhost:5000/mock/payment", "method": "POST", "body": { "amount": 100 } },
+      "dependsOn": ["order_received"]
+    },
+    {
+      "id": "check_inventory",
+      "type": "http",
+      "params": { "url": "http://localhost:5000/mock/inventory", "method": "POST", "body": { "productId": "abc", "quantity": 1 } },
+      "dependsOn": ["order_received"]
+    },
+    {
+      "id": "manual_approval",
+      "type": "human",
+      "params": { "note": "Approve high-value order" },
+      "dependsOn": ["process_payment", "check_inventory"]
+    },
+    {
+      "id": "ship_order",
+      "type": "http",
+      "params": { "url": "http://localhost:5000/mock/shipping", "method": "POST", "body": { "carrier": "UPS" } },
+      "dependsOn": ["manual_approval"]
+    },
+    {
+      "id": "send_confirmation",
+      "type": "log",
+      "params": { "message": "Confirmation sent to customer" },
+      "dependsOn": ["ship_order"]
+    }
+  ]
+}
