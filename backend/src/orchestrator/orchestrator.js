@@ -1,164 +1,136 @@
+const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const EventEmitter = require('events');
 
-class Orchestrator extends EventEmitter {
-  constructor() {
-    super();
-    this.workflows = {}; // id -> workflow
-    this.runs = {}; // runId -> run state
-    this.loadingDir = path.join(__dirname, '..', 'workflows');
-    this.loadWorkflows();
-  }
+// Base URL where our mock microservices are running
+const SERVICES_BASE_URL = 'http://localhost:4000/api/services';
 
-  loadWorkflows() {
+/**
+ * Loads the DAG workflow layout from the sample_order.json file
+ */
+const loadWorkflowBlueprint = () => {
     try {
-      if (!fs.existsSync(this.loadingDir)) return;
-      const files = fs.readdirSync(this.loadingDir);
-      files.forEach((f) => {
-        if (f.endsWith('.json')) {
-          const wf = JSON.parse(fs.readFileSync(path.join(this.loadingDir, f)));
-          this.workflows[wf.id] = wf;
+        const blueprintPath = path.join(__dirname, '../workflows/sample_order.json');
+        const rawData = fs.readFileSync(blueprintPath, 'utf8');
+        return JSON.parse(rawData);
+    } catch (error) {
+        console.error(`[ORCHESTRATOR ERROR] Failed to load workflow blueprint: ${error.message}`);
+        return null;
+    }
+};
+
+/**
+ * Core Execution Engine Function
+ * Coordinates running tasks based on their dependencies.
+ */
+const executeWorkflowInstance = async (instanceState) => {
+    const blueprint = loadWorkflowBlueprint();
+    if (!blueprint) {
+        instanceState.status = 'FAILED';
+        instanceState.logs.push('[FATAL] Workflow configuration blueprint missing.');
+        return;
+    }
+
+    instanceState.logs.push(`[ORCHESTRATOR] Starting DAG parsing for: ${blueprint.name}`);
+    
+    // Continue running until all tasks are either SUCCESS or a fatal failure happens
+    while (instanceState.status === 'RUNNING') {
+        let executionFiredInThisLoop = false;
+        const tasksToRunInParallel = [];
+
+        // Check each task in the blueprint configuration
+        for (const task of blueprint.tasks) {
+            const currentTaskState = instanceState.tasks[task.id];
+
+            // Only consider tasks that are currently PENDING
+            if (currentTaskState.status === 'PENDING') {
+                // Dependency Checker: Check if all upstream tasks in "depends_on" have completed successfully
+                const allDependenciesPassed = task.depends_on.every(depId => 
+                    instanceState.tasks[depId] && instanceState.tasks[depId].status === 'SUCCESS'
+                );
+
+                if (allDependenciesPassed) {
+                    tasksToRunInParallel.push(task);
+                }
+            }
         }
-      });
-    } catch (err) {
-      console.error('Failed loading workflows', err);
+
+        // If there are tasks ready with all dependencies cleared, fire them off in parallel!
+        if (tasksToRunInParallel.length > 0) {
+            executionFiredInThisLoop = true;
+            instanceState.logs.push(`[ORCHESTRATOR] Bundling parallel execution block for tasks: [${tasksToRunInParallel.map(t => t.id).join(', ')}]`);
+
+            // Execute tasks concurrently using Promise.all
+            const promises = tasksToRunInParallel.map(task => runSingleTask(task, instanceState));
+            await Promise.all(promises);
+        }
+
+        // Check if entire workflow lifecycle is finished
+        const allTasks = Object.keys(instanceState.tasks);
+        const allSuccess = allTasks.every(id => instanceState.tasks[id].status === 'SUCCESS');
+        const anyFailed = allTasks.some(id => instanceState.tasks[id].status === 'FAILED');
+
+        if (allSuccess) {
+            instanceState.status = 'COMPLETED';
+            instanceState.endTime = new Date();
+            instanceState.logs.push('[ORCHESTRATOR] 🎉 Pipeline completed execution successfully.');
+            console.log(`[Orchestrator] ✅ Workflow ${instanceState.id} finished perfectly.`);
+            break;
+        }
+
+        if (anyFailed) {
+            instanceState.status = 'FAILED';
+            instanceState.endTime = new Date();
+            instanceState.logs.push('[ORCHESTRATOR] ❌ Workflow terminated prematurely due to unrecovered step failure.');
+            break;
+        }
+
+        // If no tasks were fired and we aren't done, break the loop to prevent infinite cycling
+        if (!executionFiredInThisLoop) {
+            await new Promise(resolve => setTimeout(resolve, 200)); // Small pause to prevent CPU burning
+        }
     }
-  }
+};
 
-  getWorkflows() {
-    return Object.values(this.workflows);
-  }
+/**
+ * Handles sending the HTTP POST request to a single microservice node with retry logic
+ */
+const runSingleTask = async (task, instanceState) => {
+    const taskState = instanceState.tasks[task.id];
+    taskState.status = 'RUNNING';
+    taskState.attempts++;
+    
+    instanceState.logs.push(`[ORCHESTRATOR] Dispatching task [${task.id}] to endpoint ${task.endpoint} (Attempt #${taskState.attempts})`);
 
-  getRuns() {
-    return Object.values(this.runs);
-  }
-
-  getRun(runId) {
-    return this.runs[runId];
-  }
-
-  startWorkflow(workflowId) {
-    const wf = this.workflows[workflowId];
-    if (!wf) throw new Error('Workflow not found');
-
-    const runId = `run_${Date.now()}`;
-    const run = {
-      id: runId,
-      workflowId: workflowId,
-      status: 'running',
-      createdAt: new Date().toISOString(),
-      tasks: wf.tasks.map((t) => ({ ...t, status: 'pending', attempts: 0 })),
-    };
-
-    this.runs[runId] = run;
-    // start execution asynchronously
-    this._executeRun(run).catch((err) => console.error('Orchestrator run error', err));
-    return run;
-  }
-
-  async _executeRun(run) {
-    while (true) {
-      if (run.status === 'paused') {
-        await this._wait(500);
-        continue;
-      }
-
-      const pending = run.tasks.filter((t) => t.status === 'pending' && (t.dependsOn || []).every((d) => {
-        const dep = run.tasks.find((x) => x.id === d);
-        return dep && dep.status === 'completed';
-      }));
-
-      if (pending.length === 0) break;
-
-      // run all available in parallel
-      await Promise.all(pending.map((t) => this._runTask(run, t)));
-    }
-
-    // final status
-    const hasFailed = run.tasks.some((t) => t.status === 'failed');
-    run.status = hasFailed ? 'failed' : 'completed';
-    this.emit('runUpdate', run.id, run);
-  }
-
-  async _runTask(run, task) {
-    task.status = 'in-progress';
-    task.startedAt = new Date().toISOString();
-    this.emit('taskUpdate', run.id, task);
     try {
-      if (task.type === 'http') {
-        const url = task.params.url;
-        const method = (task.params.method || 'POST').toUpperCase();
-        const body = task.params.body || {};
-        const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-        const json = await res.text();
-        task.output = { status: res.status, body: json };
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        task.status = 'completed';
-      } else if (task.type === 'wait') {
-        await this._wait(task.params.ms || 1000);
-        task.status = 'completed';
-      } else if (task.type === 'log') {
-        console.log('[workflow log]', task.params.message);
-        task.status = 'completed';
-      } else if (task.type === 'human') {
-        // human approval: wait until task.approved=true set via API
-        task.status = 'waiting';
-        this.emit('taskUpdate', run.id, task);
-        // poll approval
-        while (!task.approved && run.status === 'running') {
-          await this._wait(1000);
+        // Send actual HTTP POST request to your mock microservices
+        const response = await axios.post(`${SERVICES_BASE_URL}${task.endpoint}`, {
+            orderId: instanceState.id,
+            amount: 150.00,
+            email: "customer@example.com"
+        });
+
+        if (response.status === 200 && response.data.success) {
+            taskState.status = 'SUCCESS';
+            instanceState.logs.push(`[${task.id.toUpperCase()} SERVICE] Response success received. Node marked clear.`);
+        } else {
+            throw new Error(response.data.message || "Non-200 service response");
         }
-        if (task.approved) task.status = 'completed'; else task.status = 'failed';
-      } else {
-        task.status = 'failed';
-        task.error = `Unknown task type ${task.type}`;
-      }
-    } catch (err) {
-      task.status = 'failed';
-      task.error = err.message;
+    } catch (error) {
+        instanceState.logs.push(`[${task.id.toUpperCase()} SERVICE] ⚠️ Error detected: ${error.message}`);
+        
+        // Automated Retry Logic: Max 3 attempts
+        if (taskState.attempts < 3) {
+            instanceState.logs.push(`[ORCHESTRATOR] Triggering automated retry algorithm for task [${task.id}] in 2 seconds...`);
+            taskState.status = 'PENDING'; // Put back to pending so the engine loops back and retries it
+            await new Promise(resolve => setTimeout(resolve, 2000)); // Wait before retrying
+        } else {
+            taskState.status = 'FAILED';
+            instanceState.logs.push(`[FATAL] Task [${task.id}] exceeded max retry limits. Marking pipeline broken.`);
+        }
     }
+};
 
-    task.finishedAt = new Date().toISOString();
-    task.attempts = (task.attempts || 0) + 1;
-    this.emit('taskUpdate', run.id, task);
-  }
-
-  pauseRun(runId) {
-    const run = this.runs[runId];
-    if (run) run.status = 'paused';
-    return run;
-  }
-
-  resumeRun(runId) {
-    const run = this.runs[runId];
-    if (run && run.status === 'paused') run.status = 'running';
-    // trigger execution loop if needed
-    if (run) this._executeRun(run).catch((e) => console.error(e));
-    return run;
-  }
-
-  retryTask(runId, taskId) {
-    const run = this.runs[runId];
-    if (!run) throw new Error('Run not found');
-    const task = run.tasks.find((t) => t.id === taskId);
-    if (!task) throw new Error('Task not found');
-    task.status = 'pending';
-    delete task.error;
-    this._executeRun(run).catch((e) => console.error(e));
-    return task;
-  }
-
-  approveTask(runId, taskId) {
-    const run = this.runs[runId];
-    if (!run) throw new Error('Run not found');
-    const task = run.tasks.find((t) => t.id === taskId);
-    if (!task) throw new Error('Task not found');
-    task.approved = true;
-    return task;
-  }
-
-  _wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
-}
-
-module.exports = new Orchestrator();
+module.exports = {
+    executeWorkflowInstance
+};
