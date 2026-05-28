@@ -5,9 +5,11 @@ const PORT = process.env.PORT || 4002;
 
 // simple in-memory inventory
 const inventory = {
-  'ITEM-001': 50,
-  'ITEM-002': 0,
-  'ITEM-003': 100,
+  'ITEM-001': 500,
+  'ITEM-002': 500,
+  'ITEM-003': 500,
+  'ITEM-004': 500,
+  'ITEM-005': 500,
 };
 
 app.post('/execute', (req, res, next) => {

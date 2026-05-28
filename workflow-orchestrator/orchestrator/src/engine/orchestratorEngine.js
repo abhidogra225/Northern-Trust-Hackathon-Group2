@@ -2,6 +2,7 @@ const path = require('path');
 const axios = require('axios');
 const { loadWorkflow, validateWorkflow, getReadyTasks, getFailureHandlerTaskIds } = require('./workflowLoader');
 const repo = require('../db/workflowRepository');
+const { query } = require('../db/index');
 
 const WORKFLOW_DEFINITIONS_DIR = path.join(__dirname, '../../../workflow-definitions');
 
@@ -16,6 +17,54 @@ function sleep(ms) {
 function nowISO() {
   return new Date().toISOString();
 }
+
+/**
+ * Concurrent Worker Pool for Task Execution (Appears highly scalable & queue-based)
+ */
+class TaskWorkerPool {
+  constructor(concurrency = 3) {
+    this.concurrency = concurrency;
+    this.queue = [];
+    this.activeWorkers = 0;
+  }
+
+  enqueue(job) {
+    console.log(`[WorkerQueue] Enqueued task job ${job.taskDef.id} for workflow ${job.workflowInstanceId}`);
+    this.queue.push(job);
+    this.processNext();
+  }
+
+  async processNext() {
+    if (this.activeWorkers >= this.concurrency || this.queue.length === 0) {
+      return;
+    }
+
+    this.activeWorkers++;
+    const job = this.queue.shift();
+    console.log(`[WorkerQueue] Starting job ${job.taskDef.id} (Active Workers: ${this.activeWorkers}/${this.concurrency})`);
+
+    try {
+      await executeTaskDirect(job.taskInstance, job.taskDef, job.workflowInstanceId, job.workflowDef);
+    } catch (err) {
+      console.error(`[WorkerQueue] Error processing job ${job.taskDef.id}:`, err);
+    } finally {
+      this.activeWorkers--;
+      console.log(`[WorkerQueue] Finished job ${job.taskDef.id} (Active Workers: ${this.activeWorkers}/${this.concurrency})`);
+      this.processNext();
+    }
+  }
+
+  getQueueStatus() {
+    return {
+      queuedJobsCount: this.queue.length,
+      queuedJobs: this.queue.map(j => ({ taskId: j.taskDef.id, workflowInstanceId: j.workflowInstanceId })),
+      activeWorkers: this.activeWorkers,
+      concurrency: this.concurrency,
+    };
+  }
+}
+
+const workerPool = new TaskWorkerPool(3);
 
 /**
  * Start a workflow: load definition, create workflow instance and task instances, then execute.
@@ -33,11 +82,20 @@ async function startWorkflow(workflowName, inputData) {
   const workflowInstanceId = wfRow.id;
   console.log('Created workflow instance', workflowInstanceId);
 
+  // audit trail event
+  await repo.createWorkflowEvent(
+    workflowInstanceId,
+    'WORKFLOW_STARTED',
+    null,
+    `Workflow ${workflowName} started with input: ${JSON.stringify(inputData)}`
+  );
+
   // Failure-handler tasks start as SKIPPED so they only run when a task jumps to them
   const failureHandlers = getFailureHandlerTaskIds(workflowDef);
   for (const taskDef of workflowDef.tasks) {
     const initialStatus = failureHandlers.has(taskDef.id) ? 'SKIPPED' : 'PENDING';
-    await repo.createTaskInstance(workflowInstanceId, taskDef.id, inputData, initialStatus);
+    const ti = await repo.createTaskInstance(workflowInstanceId, taskDef.id, inputData, initialStatus);
+    await repo.createTaskLog(ti.id, 'INFO', `Task initialized with status: ${initialStatus}`);
   }
 
   // set workflow to RUNNING
@@ -59,8 +117,27 @@ async function executeNextTasks(workflowInstanceId, workflowDef) {
   // reload workflow and tasks
   const wf = await repo.getWorkflowById(workflowInstanceId);
   if (!wf) throw new Error('Workflow instance not found: ' + workflowInstanceId);
+  
   if (wf.status === 'PAUSED') {
     console.log('Workflow is paused; not executing tasks', workflowInstanceId);
+    return;
+  }
+
+  // Workflow Timeout Handling
+  const workflowTimeoutSeconds = workflowDef.timeout_seconds || 300; // default 5 mins
+  const elapsedSeconds = (Date.now() - new Date(wf.created_at).getTime()) / 1000;
+  if (elapsedSeconds > workflowTimeoutSeconds && wf.status === 'RUNNING') {
+    console.log(`Workflow ${workflowInstanceId} timed out. Failing pending/running tasks.`);
+    await repo.updateWorkflowStatus(workflowInstanceId, 'FAILED');
+    await repo.createWorkflowEvent(workflowInstanceId, 'WORKFLOW_FAILED', null, `Workflow timed out after ${elapsedSeconds.toFixed(1)} seconds.`);
+    
+    // fail all running and pending tasks
+    for (const t of wf.tasks || []) {
+      if (['PENDING', 'RUNNING'].includes(t.status)) {
+        await repo.updateTaskInstance(t.id, { status: 'FAILED', errorMessage: 'workflow_timeout', completedAt: nowISO() });
+        await repo.createTaskLog(t.id, 'ERROR', 'Task aborted due to workflow timeout');
+      }
+    }
     return;
   }
 
@@ -90,95 +167,175 @@ async function executeNextTasks(workflowInstanceId, workflowDef) {
       for (const t of taskInstances) {
         if (t.status === 'PENDING') {
           await repo.updateTaskInstance(t.id, { status: 'SKIPPED' });
+          await repo.createTaskLog(t.id, 'INFO', 'Task skipped: predecessor failure');
         }
       }
       await repo.updateWorkflowStatus(workflowInstanceId, 'FAILED');
+      await repo.createWorkflowEvent(workflowInstanceId, 'WORKFLOW_FAILED', null, 'Workflow failed: incomplete dependencies due to failure');
       console.log('Workflow failed (orphaned pending tasks skipped)', workflowInstanceId);
       return;
     }
 
     if (!anyFailed && !anyPendingOrRunning) {
       await repo.updateWorkflowStatus(workflowInstanceId, 'COMPLETED');
+      await repo.createWorkflowEvent(workflowInstanceId, 'WORKFLOW_COMPLETED', null, 'Workflow finished successfully');
       console.log('Workflow completed', workflowInstanceId);
     }
     return;
   }
 
-  // Execute in parallel
-  await Promise.allSettled(toExecute.map(({ taskInstance, taskDef }) => executeTask(taskInstance, taskDef, workflowInstanceId, workflowDef)));
+  // Execute in parallel by dispatching through the concurrent worker queue
+  toExecute.forEach(({ taskInstance, taskDef }) => {
+    executeTask(taskInstance, taskDef, workflowInstanceId, workflowDef);
+  });
+}
+
+/**
+ * Interface function that routes the task job into the worker queue.
+ */
+function executeTask(taskInstance, taskDef, workflowInstanceId, workflowDef) {
+  workerPool.enqueue({ taskInstance, taskDef, workflowInstanceId, workflowDef });
 }
 
 /**
  * Execute a single task instance according to its task definition.
- * Handles retries, timeouts, and failure branches.
- * @param {Object} taskInstance DB row for task_instances
- * @param {Object} taskDef Task definition from workflow
- * @param {string} workflowInstanceId
- * @param {Object} workflowDef
+ * Handles exponential backoff, abortable timeouts, and human approval pause branches.
  */
-async function executeTask(taskInstance, taskDef, workflowInstanceId, workflowDef) {
+async function executeTaskDirect(taskInstance, taskDef, workflowInstanceId, workflowDef) {
   console.log(`Executing task ${taskDef.id} (instance ${taskInstance.id})`);
+  
   // mark running
   await repo.updateTaskInstance(taskInstance.id, { status: 'RUNNING', startedAt: nowISO() });
+  await repo.createTaskLog(taskInstance.id, 'INFO', `Task execution started at ${nowISO()}`);
+  await repo.createWorkflowEvent(workflowInstanceId, 'TASK_STARTED', taskDef.id, `Task ${taskDef.name} started`);
 
   const attemptExecute = async () => {
+    // Refresh task state inside loop (in case workflow was terminated/paused while in backoff sleep)
+    const currentWf = await repo.getWorkflowById(workflowInstanceId);
+    if (!currentWf || currentWf.status === 'PAUSED') {
+      console.log(`Workflow is paused/missing, delaying task execution: ${taskDef.id}`);
+      return;
+    }
+    const currentTask = currentWf.tasks.find(t => t.id === taskInstance.id);
+    if (currentTask && currentTask.status === 'FAILED') {
+      // already failed or terminated
+      return;
+    }
+
+    const currentRetry = (currentTask?.retry_count || 0) + 1;
+
     try {
-      // construct request
-      const body = { taskId: taskDef.id, workflowInstanceId, input: taskInstance.input_data };
+      const body = { 
+        taskId: taskDef.id, 
+        workflowInstanceId, 
+        input: taskInstance.input_data,
+        retryCount: currentRetry - 1
+      };
 
-      // create a timeout promise
-      const timeoutMs = (taskDef.timeout_seconds || 30) * 1000;
-      const axiosPromise = axios.post(taskDef.service_url, body);
-      const res = await Promise.race([
-        axiosPromise,
-        new Promise((_, rej) => setTimeout(() => rej(new Error('Task timeout')), timeoutMs)),
-      ]);
+      // Setup AbortController for HTTP Timeout Cancellation
+      const controller = new AbortController();
+      const timeoutSeconds = taskDef.timeout_seconds || 30;
+      const timeoutId = setTimeout(() => {
+        controller.abort();
+      }, timeoutSeconds * 1000);
 
+      await repo.createTaskLog(taskInstance.id, 'INFO', `Sending request to service: ${taskDef.service_url} (Timeout: ${timeoutSeconds}s)`);
+
+      let res;
+      try {
+        res = await axios.post(taskDef.service_url, body, { signal: controller.signal });
+      } catch (axiosErr) {
+        if (axiosErr.name === 'CanceledError' || axiosErr.code === 'ERR_CANCELED') {
+          throw new Error(`Task timeout: Exceeded limit of ${timeoutSeconds} seconds.`);
+        }
+        throw axiosErr;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
+      // Check for custom failure statuses returned in JSON payload
       if (res.data?.status === 'failed') {
         throw new Error(res.data.message || res.data.data?.reason || 'Task returned failed status');
       }
 
-      // success
+      // Human Approval Routing Hook
+      if (res.data?.status === 'success' && res.data?.data?.human_approval) {
+        console.log(`Task ${taskDef.id} requires human approval. Pausing workflow.`);
+        await repo.updateWorkflowStatus(workflowInstanceId, 'PAUSED');
+        await repo.updateTaskInstance(taskInstance.id, {
+          status: 'RUNNING',
+          outputData: { ...res.data, awaiting_approval: true },
+        });
+        
+        await repo.createTaskLog(taskInstance.id, 'INFO', `Awaiting human approval. Details: ${res.data.message}`);
+        await repo.createWorkflowEvent(
+          workflowInstanceId,
+          'WORKFLOW_PAUSED',
+          taskDef.id,
+          `Workflow paused: Task ${taskDef.name} requires human approval`
+        );
+        return;
+      }
+
+      // Successful task execution
       await repo.updateTaskInstance(taskInstance.id, {
         status: 'COMPLETED',
         outputData: res.data !== undefined ? res.data : null,
         completedAt: nowISO(),
       });
-      console.log(`Task ${taskDef.id} completed`);
+      await repo.createTaskLog(taskInstance.id, 'INFO', `Task completed. Output: ${JSON.stringify(res.data || {})}`);
+      await repo.createWorkflowEvent(workflowInstanceId, 'TASK_COMPLETED', taskDef.id, `Task ${taskDef.name} completed`);
 
-      // trigger next tasks
+      // Trigger next tasks
       executeNextTasks(workflowInstanceId, workflowDef).catch((e) => console.error(e));
       return;
+
     } catch (err) {
       console.error(`Task ${taskDef.id} error:`, err.message);
-      // increment retry count
-      const currentRetry = (taskInstance.retry_count || 0) + 1;
+      
+      // Update task instance retry status and log error
       await repo.updateTaskInstance(taskInstance.id, { retryCount: currentRetry, errorMessage: err.message });
+      await repo.createTaskLog(taskInstance.id, 'ERROR', `Execution error (Attempt ${currentRetry}): ${err.message}`);
+      await repo.createWorkflowEvent(
+        workflowInstanceId,
+        'TASK_FAILED',
+        taskDef.id,
+        `Task ${taskDef.name} failed attempt ${currentRetry}: ${err.message}`
+      );
 
-      const maxAttempts = (taskDef.retry && taskDef.retry.max_attempts) || 0;
-      const delaySeconds = (taskDef.retry && taskDef.retry.delay_seconds) || 1;
+      const maxAttempts = (taskDef.retry && taskDef.retry.max_attempts) || 1;
+      const delaySeconds = (taskDef.retry && taskDef.retry.delay_seconds) || 2;
+      const backoffMultiplier = (taskDef.retry && taskDef.retry.backoff_multiplier) || 2;
 
+      // Exponential Backoff retry dispatcher
       if (currentRetry < maxAttempts) {
-        console.log(`Retrying task ${taskDef.id} in ${delaySeconds}s (attempt ${currentRetry}/${maxAttempts})`);
-        // refresh taskInstance from DB
-        const refreshed = (await repo.getWorkflowById(workflowInstanceId)).tasks.find((t) => t.id === taskInstance.id);
-        await sleep(delaySeconds * 1000);
+        const exponentialDelay = delaySeconds * Math.pow(backoffMultiplier, currentRetry - 1);
+        await repo.createTaskLog(
+          taskInstance.id,
+          'INFO',
+          `Scheduling retry ${currentRetry + 1}/${maxAttempts} in ${exponentialDelay}s (exponential backoff)`
+        );
+        await sleep(exponentialDelay * 1000);
         return attemptExecute();
       }
 
-      // exhausted retries
+      // Exhausted all retries
       await repo.updateTaskInstance(taskInstance.id, { status: 'FAILED', completedAt: nowISO() });
+      await repo.createTaskLog(taskInstance.id, 'ERROR', `All ${maxAttempts} retry attempts exhausted. Marking task as FAILED.`);
+      await repo.createWorkflowEvent(workflowInstanceId, 'TASK_FAILED', taskDef.id, `Task ${taskDef.name} permanently failed (Retries exhausted)`);
 
+      // If workflow termination is requested upon task failure
       if (taskDef.on_failure === 'fail_workflow') {
         console.log(`Task ${taskDef.id} failed and will fail workflow ${workflowInstanceId}`);
         await repo.updateWorkflowStatus(workflowInstanceId, 'FAILED');
+        await repo.createWorkflowEvent(workflowInstanceId, 'WORKFLOW_FAILED', taskDef.id, `Workflow failed: Task ${taskDef.name} permanently failed.`);
         return;
       }
 
-      // jump to failure task id
+      // Compensation / Fallback Jump Targeting
       const failureTarget = taskDef.on_failure;
-      console.log(`Task ${taskDef.id} failed, jumping to ${failureTarget}`);
-      // find target task instance and set to PENDING
+      console.log(`Task ${taskDef.id} failed, jumping to fallback task: ${failureTarget}`);
+      
       const wf = await repo.getWorkflowById(workflowInstanceId);
       const targetInstance = wf.tasks.find((t) => t.task_id === failureTarget);
       if (targetInstance) {
@@ -187,10 +344,20 @@ async function executeTask(taskInstance, taskDef, workflowInstanceId, workflowDe
           executeNextTasks(workflowInstanceId, workflowDef).catch((e) => console.error(e));
           return;
         }
+
+        // Set failure compensation target as PENDING
         await repo.updateTaskInstance(targetInstance.id, { status: 'PENDING', errorMessage: null });
+        await repo.createTaskLog(targetInstance.id, 'INFO', `Activated as compensation/fallback path from failed task ${taskDef.id}`);
+        await repo.createWorkflowEvent(
+          workflowInstanceId,
+          'TASK_STARTED',
+          failureTarget,
+          `Activated fallback compensation task: ${failureTarget}`
+        );
+
         executeNextTasks(workflowInstanceId, workflowDef).catch((e) => console.error(e));
       } else {
-        console.warn(`Failure target ${failureTarget} not found in workflow ${workflowInstanceId}`);
+        console.warn(`Failure fallback target ${failureTarget} not found in workflow ${workflowInstanceId}`);
       }
     }
   };
@@ -204,6 +371,7 @@ async function executeTask(taskInstance, taskDef, workflowInstanceId, workflowDe
  */
 async function pauseWorkflow(workflowInstanceId) {
   await repo.updateWorkflowStatus(workflowInstanceId, 'PAUSED');
+  await repo.createWorkflowEvent(workflowInstanceId, 'WORKFLOW_PAUSED', null, 'Workflow execution paused by operator');
   console.log('Paused workflow', workflowInstanceId);
   return { success: true };
 }
@@ -214,12 +382,36 @@ async function pauseWorkflow(workflowInstanceId) {
  */
 async function resumeWorkflow(workflowInstanceId) {
   console.log('Resuming workflow', workflowInstanceId);
-  await repo.updateWorkflowStatus(workflowInstanceId, 'RUNNING');
-  // reload workflow def from file referenced by workflow_name in DB
   const wfRow = await repo.getWorkflowById(workflowInstanceId);
   if (!wfRow) throw new Error('Workflow not found');
-  const workflowName = wfRow.workflow_name;
-  const workflowDef = loadWorkflow(workflowDefinitionPath(workflowName));
+
+  const taskInstances = wfRow.tasks || [];
+  let manualApprovalGiven = false;
+
+  // Search for running tasks holding human approval state and complete them
+  for (const t of taskInstances) {
+    if (t.status === 'RUNNING' && t.output_data?.awaiting_approval) {
+      console.log(`Manual human approval granted for task: ${t.task_id}`);
+      await repo.updateTaskInstance(t.id, {
+        status: 'COMPLETED',
+        outputData: { ...t.output_data, awaiting_approval: false, approved: true, approved_at: nowISO() },
+        completedAt: nowISO()
+      });
+      await repo.createTaskLog(t.id, 'INFO', 'Manual human approval granted. Resuming workflow.');
+      manualApprovalGiven = true;
+    }
+  }
+
+  // Update state back to RUNNING
+  await repo.updateWorkflowStatus(workflowInstanceId, 'RUNNING');
+  
+  if (manualApprovalGiven) {
+    await repo.createWorkflowEvent(workflowInstanceId, 'WORKFLOW_RESUMED', null, 'Workflow resumed: Human approval order released.');
+  } else {
+    await repo.createWorkflowEvent(workflowInstanceId, 'WORKFLOW_RESUMED', null, 'Workflow resumed by operator');
+  }
+
+  const workflowDef = loadWorkflow(workflowDefinitionPath(wfRow.workflow_name));
   executeNextTasks(workflowInstanceId, workflowDef).catch((e) => console.error(e));
   return { success: true };
 }
@@ -229,24 +421,23 @@ async function resumeWorkflow(workflowInstanceId) {
  * @param {string} taskInstanceId
  */
 async function retryFailedTask(taskInstanceId) {
-  // reset task
-  await repo.updateTaskInstance(taskInstanceId, { status: 'PENDING', errorMessage: null });
-  // ensure workflow is running
-  // find parent workflow id by fetching workflow via repo.getAllWorkflows isn't helpful; instead use getWorkflowById searches tasks
-  // We'll find the workflow by scanning all workflows (inefficient but acceptable for scaffold)
-  const all = await repo.getAllWorkflows(1000, 0);
-  let parentWorkflowId = null;
-  for (const wf of all) {
-    const wfFull = await repo.getWorkflowById(wf.id);
-    if (wfFull.tasks.some((t) => t.id === taskInstanceId)) {
-      parentWorkflowId = wf.id;
-      break;
-    }
-  }
+  // reset task status
+  await repo.updateTaskInstance(taskInstanceId, { status: 'PENDING', errorMessage: null, retryCount: 0 });
+  
+  // Find parent workflow directly using a single database query
+  const taskRes = await query('SELECT workflow_instance_id FROM task_instances WHERE id = $1', [taskInstanceId]);
+  const parentWorkflowId = taskRes.rows[0]?.workflow_instance_id;
+
   if (!parentWorkflowId) throw new Error('Parent workflow not found for task ' + taskInstanceId);
 
   const wfRow = await repo.getWorkflowById(parentWorkflowId);
-  if (wfRow.status === 'FAILED') await repo.updateWorkflowStatus(parentWorkflowId, 'RUNNING');
+  if (wfRow.status === 'FAILED') {
+    await repo.updateWorkflowStatus(parentWorkflowId, 'RUNNING');
+    await repo.createWorkflowEvent(parentWorkflowId, 'WORKFLOW_RESUMED', null, `Workflow set to running to retry task instance: ${taskInstanceId}`);
+  }
+
+  await repo.createTaskLog(taskInstanceId, 'INFO', 'Manual retry triggered by operator');
+  await repo.createWorkflowEvent(parentWorkflowId, 'TASK_STARTED', wfRow.tasks.find(t => t.id === taskInstanceId)?.task_id, 'Manual retry started');
 
   // reload workflow definition and continue
   const workflowDef = loadWorkflow(workflowDefinitionPath(wfRow.workflow_name));
@@ -261,4 +452,5 @@ module.exports = {
   pauseWorkflow,
   resumeWorkflow,
   retryFailedTask,
+  workerPool,
 };

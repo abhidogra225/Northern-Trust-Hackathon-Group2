@@ -34,19 +34,28 @@ async function ensureSchema() {
   const schemaPath = path.join(__dirname, 'db', 'schema.sql');
   if (!fs.existsSync(schemaPath)) return;
   const sql = fs.readFileSync(schemaPath, 'utf8');
-  try {
-    console.log('Applying DB schema (if needed)');
-    await pool.query(sql);
-    console.log('Schema applied');
-  } catch (err) {
-    // Schema already exists on restarts (enums/tables created previously)
-    if (err.code === '42710' || err.code === '42P07') {
-      console.log('Schema already present, skipping');
-      return;
+  
+  // Split sql file by semicolon to run statements individually
+  const statements = sql
+    .split(';')
+    .map(stmt => stmt.trim())
+    .filter(stmt => stmt.length > 0);
+
+  console.log(`Applying DB schema incrementally (${statements.length} statements)`);
+  
+  for (const stmt of statements) {
+    try {
+      await pool.query(stmt);
+    } catch (err) {
+      // 42710: type already exists, 42P07: relation/table already exists
+      if (err.code === '42710' || err.code === '42P07') {
+        continue;
+      }
+      console.error(`Error executing schema statement: "${stmt.slice(0, 50)}..."`, err.message);
+      throw err;
     }
-    console.error('Error applying schema:', err.message);
-    throw err;
   }
+  console.log('Incremental schema migrations applied successfully');
 }
 
 async function start() {

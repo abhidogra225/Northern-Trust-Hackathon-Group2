@@ -57,3 +57,11 @@ export function terminateWorkflow(workflowId) {
 export function retryTask(taskId) {
   return request(`/tasks/${taskId}/retry`, { method: 'POST' });
 }
+
+export function getWorkflowEvents(workflowId) {
+  return request(`/workflows/${workflowId}/events`);
+}
+
+export function getQueueStatus() {
+  return request('/queue/status');
+}

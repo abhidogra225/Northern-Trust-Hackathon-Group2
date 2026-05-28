@@ -11,12 +11,21 @@ function randomDigits(n) {
 
 app.post('/execute', async (req, res, next) => {
   try {
-    const { taskId, workflowInstanceId, input } = req.body || {};
-    await new Promise((r) => setTimeout(r, 300));
+    const { taskId, workflowInstanceId, input, retryCount } = req.body || {};
+    await new Promise((r) => setTimeout(r, 500));
 
     const address = input && input.address;
     if (!address) {
       return res.json({ status: 'failed', data: { reason: 'missing_address' }, message: 'Address missing' });
+    }
+
+    // Temporary shipping failure simulation if address contains "FAIL" and retry count is 0
+    if (typeof address === 'string' && address.toUpperCase().includes('FAIL') && (retryCount === 0 || retryCount === undefined)) {
+      return res.json({
+        status: 'failed',
+        data: { reason: 'carrier_timeout' },
+        message: 'Carrier connection timeout (Temporary pickup failure simulated)'
+      });
     }
 
     const tracking = 'TRK-' + randomDigits(8);
@@ -30,7 +39,7 @@ app.post('/execute', async (req, res, next) => {
     return res.json({
       status: 'success',
       data: { tracking_number: tracking, courier, estimated_delivery: est, label_url: labelUrl },
-      message: 'Shipment created',
+      message: 'Shipment created successfully',
     });
   } catch (err) {
     next(err);

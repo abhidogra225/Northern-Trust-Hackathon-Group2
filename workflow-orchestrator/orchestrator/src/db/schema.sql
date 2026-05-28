@@ -30,3 +30,23 @@ CREATE TABLE IF NOT EXISTS task_instances (
   started_at TIMESTAMP WITH TIME ZONE,
   completed_at TIMESTAMP WITH TIME ZONE
 );
+
+-- Table: task_logs
+CREATE TABLE IF NOT EXISTS task_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  task_instance_id UUID NOT NULL REFERENCES task_instances(id) ON DELETE CASCADE,
+  log_level VARCHAR NOT NULL DEFAULT 'INFO',
+  message TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- Table: workflow_events
+CREATE TABLE IF NOT EXISTS workflow_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workflow_instance_id UUID NOT NULL REFERENCES workflow_instances(id) ON DELETE CASCADE,
+  event_type VARCHAR NOT NULL,
+  task_id VARCHAR,
+  message TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+

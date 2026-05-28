@@ -16,10 +16,20 @@ async function createWorkflow(name, inputData) {
   return res.rows[0];
 }
 
+const fs = require('fs');
+const path = require('path');
+const yaml = require('js-yaml');
+
+const WORKFLOW_DEFINITIONS_DIR = path.join(__dirname, '../../../workflow-definitions');
+
+function workflowDefinitionPath(workflowName) {
+  return path.join(WORKFLOW_DEFINITIONS_DIR, `${workflowName}.yaml`);
+}
+
 /**
- * Get a workflow instance by id, including its task instances.
+ * Get a workflow instance by id, including its task instances and dynamic definition.
  * @param {string} id Workflow instance UUID
- * @returns {Promise<Object|null>} workflow row with `tasks` array or null
+ * @returns {Promise<Object|null>} workflow row with `tasks` array, `definition` object or null
  */
 async function getWorkflowById(id) {
   const wfRes = await query('SELECT * FROM workflow_instances WHERE id = $1', [id]);
@@ -27,6 +37,17 @@ async function getWorkflowById(id) {
   if (!wf) return null;
   const tasksRes = await query('SELECT * FROM task_instances WHERE workflow_instance_id = $1 ORDER BY id', [id]);
   wf.tasks = tasksRes.rows;
+
+  // dynamically load the definition from the YAML file
+  try {
+    const yamlPath = workflowDefinitionPath(wf.workflow_name);
+    if (fs.existsSync(yamlPath)) {
+      const raw = fs.readFileSync(yamlPath, 'utf8');
+      wf.definition = yaml.load(raw);
+    }
+  } catch (err) {
+    console.error('Error loading workflow definition inside repository:', err.message);
+  }
   return wf;
 }
 
@@ -195,6 +216,50 @@ async function terminateWorkflow(workflowId) {
   );
 }
 
+/**
+ * Create a new event for a workflow instance.
+ */
+async function createWorkflowEvent(workflowInstanceId, eventType, taskId = null, message = null) {
+  const sql = `
+    INSERT INTO workflow_events (workflow_instance_id, event_type, task_id, message)
+    VALUES ($1, $2, $3, $4)
+    RETURNING *
+  `;
+  const res = await query(sql, [workflowInstanceId, eventType, taskId, message]);
+  return res.rows[0];
+}
+
+/**
+ * Get all events for a workflow instance.
+ */
+async function getWorkflowEvents(workflowInstanceId) {
+  const sql = 'SELECT * FROM workflow_events WHERE workflow_instance_id = $1 ORDER BY created_at ASC';
+  const res = await query(sql, [workflowInstanceId]);
+  return res.rows;
+}
+
+/**
+ * Create a new log for a task instance.
+ */
+async function createTaskLog(taskInstanceId, logLevel, message) {
+  const sql = `
+    INSERT INTO task_logs (task_instance_id, log_level, message)
+    VALUES ($1, $2, $3)
+    RETURNING *
+  `;
+  const res = await query(sql, [taskInstanceId, logLevel, message]);
+  return res.rows[0];
+}
+
+/**
+ * Get all logs for a task instance.
+ */
+async function getTaskLogs(taskInstanceId) {
+  const sql = 'SELECT * FROM task_logs WHERE task_instance_id = $1 ORDER BY created_at ASC';
+  const res = await query(sql, [taskInstanceId]);
+  return res.rows;
+}
+
 module.exports = {
   createWorkflow,
   getWorkflowById,
@@ -204,4 +269,9 @@ module.exports = {
   getAllWorkflows,
   getWorkflowsPaginated,
   terminateWorkflow,
+  createWorkflowEvent,
+  getWorkflowEvents,
+  createTaskLog,
+  getTaskLogs,
 };
+

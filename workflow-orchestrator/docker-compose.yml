@@ -1,4 +1,5 @@
 version: '3.8'
+
 services:
   db:
     image: postgres:13
@@ -10,6 +11,11 @@ services:
       - "5432:5432"
     volumes:
       - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d orders_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   orchestrator:
     build: ./orchestrator
@@ -21,11 +27,16 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      - db
-      - payment-service
-      - inventory-service
-      - shipping-service
-      - notification-service
+      db:
+        condition: service_healthy
+      payment-service:
+        condition: service_started
+      inventory-service:
+        condition: service_started
+      shipping-service:
+        condition: service_started
+      notification-service:
+        condition: service_started
 
   payment-service:
     build: ./services/payment-service
@@ -46,6 +57,13 @@ services:
     build: ./services/notification-service
     ports:
       - "4004:4004"
+
+  frontend-ui:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - orchestrator
 
 volumes:
   db-data:
