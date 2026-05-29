@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
+  <style>
+    .bg { fill: #f4f4f1 }
+    .node { fill: #ffffff; stroke: #0d5c46; stroke-width: 2; rx: 12; }
+    .label { font-family: 'Outfit', Arial, sans-serif; font-size:14px; fill:#12352d; font-weight:700 }
+    .sub { font-family: 'Fira Code', monospace; font-size:12px; fill:#4f6b63 }
+    .arrow { stroke:#0d5c46; stroke-width:2; marker-end:url(#arrowhead) }
+  </style>
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0d5c46" />
+    </marker>
+  </defs>
+  <rect width="1200" height="800" class="bg" />
+
+  <!-- Frontend -->
+  <rect x="40" y="40" width="220" height="80" class="node"/>
+  <text x="150" y="80" text-anchor="middle" class="label">Frontend Dashboard</text>
+  <text x="150" y="98" text-anchor="middle" class="sub">React / Vite</text>
+
+  <!-- Orchestrator API -->
+  <rect x="320" y="40" width="240" height="80" class="node"/>
+  <text x="440" y="80" text-anchor="middle" class="label">Orchestrator API</text>
+  <text x="440" y="98" text-anchor="middle" class="sub">Express</text>
+
+  <!-- Workflow Engine -->
+  <rect x="620" y="40" width="220" height="80" class="node"/>
+  <text x="730" y="80" text-anchor="middle" class="label">Workflow Engine</text>
+  <text x="730" y="98" text-anchor="middle" class="sub">DAG & Scheduling</text>
+
+  <!-- Redis Event Bus -->
+  <rect x="930" y="40" width="220" height="80" class="node"/>
+  <text x="1040" y="80" text-anchor="middle" class="label">Redis Event Bus</text>
+  <text x="1040" y="98" text-anchor="middle" class="sub">Pub/Sub</text>
+
+  <!-- Arrows -->
+  <path d="M 260 80 L 320 80" class="arrow" />
+  <path d="M 560 80 L 620 80" class="arrow" />
+  <path d="M 840 80 L 930 80" class="arrow" />
+
+  <!-- Task Queue & Workers -->
+  <rect x="320" y="180" width="220" height="60" class="node"/>
+  <text x="430" y="215" text-anchor="middle" class="label">Task Queue</text>
+  <rect x="620" y="180" width="220" height="60" class="node"/>
+  <text x="730" y="215" text-anchor="middle" class="label">Worker Services</text>
+
+  <path d="M 440 120 L 440 180" class="arrow" />
+  <path d="M 730 120 L 730 180" class="arrow" />
+
+  <!-- Downstream services -->
+  <rect x="80" y="360" width="220" height="60" class="node"/>
+  <text x="190" y="395" text-anchor="middle" class="label">Payment Service</text>
+  <rect x="360" y="360" width="220" height="60" class="node"/>
+  <text x="470" y="395" text-anchor="middle" class="label">Inventory Service</text>
+  <rect x="640" y="360" width="220" height="60" class="node"/>
+  <text x="750" y="395" text-anchor="middle" class="label">Fraud Service</text>
+  <rect x="920" y="360" width="220" height="60" class="node"/>
+  <text x="1030" y="395" text-anchor="middle" class="label">Notification Service</text>
+
+  <path d="M 540 240 L 190 360" class="arrow" />
+  <path d="M 540 240 L 470 360" class="arrow" />
+  <path d="M 540 240 L 750 360" class="arrow" />
+  <path d="M 540 240 L 1030 360" class="arrow" />
+
+  <!-- Footer note -->
+  <text x="600" y="760" text-anchor="middle" class="sub">Enterprise-style orchestration diagram • Northern Trust palette</text>
+</svg>

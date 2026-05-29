@@ -1,0 +1,93 @@
+id: order_flow
+name: "E-Commerce Order Processing Flow"
+description: "Order placed -> payment -> inventory+fraud parallel -> shipping -> notify -> update status"
+version: 1
+
+tasks:
+  - id: validate-order
+    name: "Validate Order"
+    type: "http"
+    service_url: "http://inventory-service:4002/execute"
+    depends_on: []
+    on_failure: "send-notification-failure"
+    retry:
+      max_attempts: 3
+      delay_seconds: 2
+    timeout_seconds: 10
+
+  - id: process-payment
+    name: "Process Payment"
+    type: "http"
+    service_url: "http://payment-service:4001/execute"
+    depends_on: [validate-order]
+    on_failure: "send-notification-failure"
+    retry:
+      max_attempts: 3
+      delay_seconds: 2
+    timeout_seconds: 15
+
+  - id: check-inventory
+    name: "Check Inventory"
+    type: "http"
+    service_url: "http://inventory-service:4002/execute"
+    depends_on: [process-payment]
+    on_failure: "fail_workflow"
+    retry:
+      max_attempts: 3
+      delay_seconds: 2
+    timeout_seconds: 10
+
+  - id: check-fraud
+    name: "Check Fraud"
+    type: "http"
+    service_url: "http://payment-service:4001/execute"
+    depends_on: [process-payment]
+    on_failure: "fail_workflow"
+    retry:
+      max_attempts: 2
+      delay_seconds: 2
+    timeout_seconds: 8
+
+  - id: create-shipment
+    name: "Create Shipment"
+    type: "http"
+    service_url: "http://shipping-service:4003/execute"
+    depends_on: [check-inventory, check-fraud]
+    on_failure: "fail_workflow"
+    retry:
+      max_attempts: 3
+      delay_seconds: 5
+    timeout_seconds: 20
+
+  - id: send-notification-success
+    name: "Send Success Notification"
+    type: "http"
+    service_url: "http://notification-service:4004/execute"
+    depends_on: [create-shipment]
+    on_failure: "fail_workflow"
+    retry:
+      max_attempts: 2
+      delay_seconds: 2
+    timeout_seconds: 5
+
+  - id: send-notification-failure
+    name: "Send Failure Notification"
+    type: "http"
+    service_url: "http://notification-service:4004/execute"
+    depends_on: []
+    on_failure: "fail_workflow"
+    retry:
+      max_attempts: 1
+      delay_seconds: 1
+    timeout_seconds: 5
+
+  - id: update-order-status
+    name: "Update Order Status"
+    type: "http"
+    service_url: "http://notification-service:4004/execute"
+    depends_on: [send-notification-success]
+    on_failure: "fail_workflow"
+    retry:
+      max_attempts: 2
+      delay_seconds: 1
+    timeout_seconds: 5

@@ -1,0 +1,20 @@
+{
+  "name": "workflow-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "express": "*",
+    "pg": "*",
+    "js-yaml": "*",
+    "uuid": "*",
+    "cors": "*",
+    "dotenv": "*",
+    "axios": "*",
+    "redis": "*"
+  }
+}

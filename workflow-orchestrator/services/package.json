@@ -1,0 +1,10 @@
+{
+  "name": "workflow-mock-services",
+  "private": true,
+  "scripts": {
+    "start:all": "concurrently \"node payment-service/index.js\" \"node inventory-service/index.js\" \"node shipping-service/index.js\" \"node notification-service/index.js\""
+  },
+  "dependencies": {
+    "concurrently": "*"
+  }
+}
