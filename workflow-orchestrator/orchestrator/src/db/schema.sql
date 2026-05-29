@@ -6,6 +6,16 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- Enums for statuses
 CREATE TYPE workflow_status AS ENUM ('PENDING','RUNNING','PAUSED','COMPLETED','FAILED');
 CREATE TYPE task_status AS ENUM ('PENDING','RUNNING','COMPLETED','FAILED','SKIPPED');
+-- add retry-related statuses if missing (safe on re-run)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_enum e JOIN pg_type t ON e.enumtypid = t.oid WHERE t.typname = 'task_status' AND e.enumlabel = 'RETRYING') THEN
+    ALTER TYPE task_status ADD VALUE 'RETRYING';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_enum e JOIN pg_type t ON e.enumtypid = t.oid WHERE t.typname = 'task_status' AND e.enumlabel = 'MAX_RETRIES_EXCEEDED') THEN
+    ALTER TYPE task_status ADD VALUE 'MAX_RETRIES_EXCEEDED';
+  END IF;
+END$$;
 
 -- Table: workflow_instances
 CREATE TABLE IF NOT EXISTS workflow_instances (

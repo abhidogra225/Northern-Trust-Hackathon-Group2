@@ -798,6 +798,33 @@ textarea:focus {
   stroke-width: 2;
 }
 
+/* DAG node visuals */
+.dag-node {
+  width: 200px;
+  padding: 0.85rem;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff, #f9fbf9);
+  border: 1px solid rgba(13,92,70,0.06);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.06);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+.dag-node.RUNNING {
+  animation: node-pulse 1.6s infinite ease-in-out;
+  border-color: rgba(13,92,70,0.18);
+}
+
+.dag-node.FAILED {
+  box-shadow: 0 8px 28px rgba(192,57,43,0.12);
+  border-color: rgba(192,57,43,0.22);
+}
+
+@keyframes node-pulse {
+  0% { transform: translateY(0); box-shadow: 0 6px 18px rgba(13,92,70,0.04); }
+  50% { transform: translateY(-3px); box-shadow: 0 12px 28px rgba(13,92,70,0.08); }
+  100% { transform: translateY(0); box-shadow: 0 6px 18px rgba(13,92,70,0.04); }
+}
+
 @keyframes marching-ants {
   0% {
     stroke-dashoffset: 20;

@@ -30,12 +30,14 @@ You can start workflows, monitor live task state, and control workflow execution
 ## Setup
 
 1. **Clone the repository**
+
    ```bash
    git clone <your-repo-url>
    cd workflow-orchestrator
    ```
 
 2. **Install dependencies**
+
    ```bash
    # orchestrator
    cd orchestrator && npm install && cd ..
@@ -56,15 +58,18 @@ You can start workflows, monitor live task state, and control workflow execution
 3. **Setup PostgreSQL and run schema**
    - Create a DB named `orders_db` (or your preferred name).
    - Run:
+
    ```bash
    psql -U postgres -d orders_db -f orchestrator/src/db/schema.sql
    ```
 
 4. **Configure environment**
+
    ```bash
    cd orchestrator
    cp .env.example .env
    ```
+
    Fill `.env` with your local values, for example:
    - `PORT=3000`
    - `DATABASE_URL=postgres://postgres:postgres@localhost:5432/orders_db`
@@ -72,6 +77,7 @@ You can start workflows, monitor live task state, and control workflow execution
 
 5. **Start all services**
    In separate terminals:
+
    ```bash
    # payment
    cd services/payment-service && npm start
@@ -97,16 +103,16 @@ You can start workflows, monitor live task state, and control workflow execution
 
 ## API Reference
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/workflows/start` | POST | Start a new workflow instance |
-| `/api/workflows` | GET | List workflow instances with pagination/filter |
-| `/api/workflows/:id` | GET | Get one workflow with all task instances |
-| `/api/workflows/:id/pause` | POST | Pause a running workflow |
-| `/api/workflows/:id/resume` | POST | Resume a paused workflow |
-| `/api/workflows/:id/terminate` | POST | Manually terminate workflow (mark failed) |
-| `/api/tasks/:taskId/retry` | POST | Retry a failed task instance |
-| `/api/workflows/:id/logs` | GET | Fetch task log-style status/output timeline |
+| Endpoint                       | Method | Description                                    |
+| ------------------------------ | ------ | ---------------------------------------------- |
+| `/api/workflows/start`         | POST   | Start a new workflow instance                  |
+| `/api/workflows`               | GET    | List workflow instances with pagination/filter |
+| `/api/workflows/:id`           | GET    | Get one workflow with all task instances       |
+| `/api/workflows/:id/pause`     | POST   | Pause a running workflow                       |
+| `/api/workflows/:id/resume`    | POST   | Resume a paused workflow                       |
+| `/api/workflows/:id/terminate` | POST   | Manually terminate workflow (mark failed)      |
+| `/api/tasks/:taskId/retry`     | POST   | Retry a failed task instance                   |
+| `/api/workflows/:id/logs`      | GET    | Fetch task log-style status/output timeline    |
 
 ## How To Run Tests
 
@@ -118,6 +124,7 @@ node testRun.js
 ```
 
 What `testRun.js` does:
+
 - Runs a **success scenario** with normal card data.
 - Runs a **failure scenario** with card number ending in `0000`.
 - Polls workflow status every second and prints a live task status table.
@@ -130,3 +137,31 @@ What `testRun.js` does:
 - Retry behavior and failure branching can be improved with richer state-machine semantics.
 - Test runner is console-based and not integrated into automated CI yet.
 - No auth/rate-limiting is enabled on API endpoints (recommended for production).
+
+## New Features (Added)
+
+- **Conditional Branching**: workflows may now specify `on_success`, `on_failure` and `condition` branches in YAML. The orchestrator persists branch decisions and records them in the audit trail.
+
+- **Retry Mechanism**: tasks support a `retry` block (e.g. `max_attempts`, `delay_seconds`) and runtime states `RETRYING` / `MAX_RETRIES_EXCEEDED`. Retry attempts are recorded in the audit log and cause visual retry badges in the dashboard.
+
+- **Failure Routing & Escalation**: tasks can route failures to notification, escalation, or fallback tasks using `on_failure` arrays. An example `escalation-service` is included under `services/`.
+
+- **Redis Event Bus**: the orchestrator now publishes lifecycle events to a Redis Pub/Sub channel. Events include `WORKFLOW_STARTED`, `TASK_STARTED`, `TASK_COMPLETED`, `TASK_FAILED`, `WORKFLOW_COMPLETED`, `RETRY_ATTEMPT`, `RETRY_SUCCEEDED`, and `RETRY_FAILED`.
+
+### Running with Redis
+
+1. Start Redis locally, for example using Docker:
+
+```bash
+docker run -p 6379:6379 -d redis:7
+```
+
+2. Set `REDIS_URL` in `orchestrator/.env` (e.g. `redis://localhost:6379`).
+
+3. Install orchestrator dependencies and run:
+
+```bash
+cd orchestrator && npm install && npm start
+```
+
+The orchestrator will attempt to connect to Redis at startup; if not available it will continue operating in a best-effort mode.

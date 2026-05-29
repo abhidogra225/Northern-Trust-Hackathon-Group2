@@ -34,8 +34,8 @@ function validateWorkflow(workflowDef) {
   const idToTask = new Map();
   const errors = [];
 
-  // Required fields per task
-  const requiredFields = ['id', 'name', 'type', 'service_url', 'depends_on', 'on_failure', 'retry', 'timeout_seconds'];
+  // Required fields per task (minimal: id and type)
+  const requiredFields = ['id', 'type'];
 
   tasks.forEach((t, idx) => {
     if (!t || typeof t !== 'object') {
@@ -54,26 +54,34 @@ function validateWorkflow(workflowDef) {
       }
     });
 
-    // type check
-    if (t.type && !['http', 'db_update'].includes(t.type)) {
-      errors.push(`Task '${t.id}': invalid type '${t.type}'`);
+    // depends_on must be array when present
+    if (t.depends_on !== undefined && !Array.isArray(t.depends_on)) {
+      errors.push(`Task '${t.id}': 'depends_on' must be an array when present`);
     }
 
-    // depends_on must be array
-    if (t.depends_on && !Array.isArray(t.depends_on)) {
-      errors.push(`Task '${t.id}': 'depends_on' must be an array`);
+    // on_success may be an array of task ids
+    if (t.on_success !== undefined && !Array.isArray(t.on_success)) {
+      errors.push(`Task '${t.id}': 'on_success' must be an array of task ids when present`);
     }
 
-    // retry shape
+    // on_failure may be array, a single string task id, or the special string 'fail_workflow'
+    if (
+      t.on_failure !== undefined &&
+      !(Array.isArray(t.on_failure) || typeof t.on_failure === 'string')
+    ) {
+      errors.push(`Task '${t.id}': 'on_failure' must be an array, a task id string, or 'fail_workflow' when present`);
+    }
+
+    // retry shape (optional)
     if (t.retry) {
       if (typeof t.retry !== 'object') errors.push(`Task '${t.id}': 'retry' must be an object`);
       else {
-        if (typeof t.retry.max_attempts !== 'number') errors.push(`Task '${t.id}': 'retry.max_attempts' must be a number`);
-        if (typeof t.retry.delay_seconds !== 'number') errors.push(`Task '${t.id}': 'retry.delay_seconds' must be a number`);
+        if (t.retry.max_attempts !== undefined && typeof t.retry.max_attempts !== 'number') errors.push(`Task '${t.id}': 'retry.max_attempts' must be a number`);
+        if (t.retry.delay_seconds !== undefined && typeof t.retry.delay_seconds !== 'number') errors.push(`Task '${t.id}': 'retry.delay_seconds' must be a number`);
       }
     }
 
-    // timeout_seconds must be number
+    // timeout_seconds must be number when present
     if (t.timeout_seconds !== undefined && typeof t.timeout_seconds !== 'number') {
       errors.push(`Task '${t.id}': 'timeout_seconds' must be a number`);
     }
@@ -87,15 +95,32 @@ function validateWorkflow(workflowDef) {
     });
   });
 
-  // cycle detection using DFS
+  // Validate on_success and on_failure references exist
+  tasks.forEach((t) => {
+    const succs = t.on_success || [];
+    succs.forEach((s) => {
+      if (!idToTask.has(s)) errors.push(`Task '${t.id}': on_success references unknown task '${s}'`);
+    });
+    if (Array.isArray(t.on_failure)) {
+      t.on_failure.forEach((s) => {
+        if (!idToTask.has(s)) errors.push(`Task '${t.id}': on_failure references unknown task '${s}'`);
+      });
+    }
+  });
+
+  // cycle detection using DFS across depends_on and conditional branches
   const WHITE = 0, GREY = 1, BLACK = 2;
   const state = {};
   ids.forEach((id) => (state[id] = WHITE));
 
   function dfs(node) {
     state[node] = GREY;
-    const deps = idToTask.get(node).depends_on || [];
-    for (const neigh of deps) {
+    // neighbors include depends_on, on_success, and on_failure branches
+    const task = idToTask.get(node);
+    const neighs = new Set([...(task.depends_on || []), ...(task.on_success || [])]);
+    if (Array.isArray(task.on_failure)) task.on_failure.forEach((n) => neighs.add(n));
+
+    for (const neigh of neighs) {
       if (state[neigh] === GREY) {
         return [`Cycle detected: ${node} -> ${neigh}`];
       }
@@ -148,7 +173,9 @@ function getReadyTasks(workflowDef, completedTaskIds) {
 function getFailureHandlerTaskIds(workflowDef) {
   const ids = new Set();
   for (const task of workflowDef.tasks || []) {
-    if (task.on_failure && task.on_failure !== 'fail_workflow') {
+    if (Array.isArray(task.on_failure)) {
+      for (const t of task.on_failure) ids.add(t);
+    } else if (task.on_failure && task.on_failure !== 'fail_workflow') {
       ids.add(task.on_failure);
     }
   }

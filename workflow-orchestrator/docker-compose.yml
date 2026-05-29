@@ -17,12 +17,25 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7
+    container_name: workflow-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -i PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   orchestrator:
     build: ./orchestrator
     working_dir: /usr/src/app
     environment:
       - PORT=3000
       - DATABASE_URL=postgres://postgres:postgres@db:5432/orders_db
+      - REDIS_URL=redis://redis:6379
+      - WORKFLOW_EVENTS_CHANNEL=workflow_events
       - NODE_ENV=development
     ports:
       - "3000:3000"

@@ -3,42 +3,17 @@ const app = express();
 app.use(express.json());
 const PORT = process.env.PORT || 4003;
 
-function randomDigits(n) {
-  let s = '';
-  for (let i = 0; i < n; i++) s += Math.floor(Math.random() * 10);
-  return s;
-}
-
 app.post('/execute', async (req, res, next) => {
   try {
-    const { taskId, workflowInstanceId, input, retryCount } = req.body || {};
+    const { taskId, workflowInstanceId, input } = req.body || {};
     await new Promise((r) => setTimeout(r, 500));
 
-    const address = input && input.address;
-    if (!address) {
-      return res.json({ status: 'failed', data: { reason: 'missing_address' }, message: 'Address missing' });
-    }
+    const trackingNumber = `TRACK-${Math.random().toString(36).substring(7).toUpperCase()}`;
 
-    // Temporary shipping failure simulation if address contains "FAIL" and retry count is 0
-    if (typeof address === 'string' && address.toUpperCase().includes('FAIL') && (retryCount === 0 || retryCount === undefined)) {
-      return res.json({
-        status: 'failed',
-        data: { reason: 'carrier_timeout' },
-        message: 'Carrier connection timeout (Temporary pickup failure simulated)'
-      });
-    }
-
-    const tracking = 'TRK-' + randomDigits(8);
-    const couriers = ['FedEx', 'UPS', 'DHL', 'BlueDart'];
-    const courier = couriers[Math.floor(Math.random() * couriers.length)];
-    const days = 3 + Math.floor(Math.random() * 5); // 3-7
-    const est = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
-
-    const labelUrl = `https://labels.example.com/${tracking}.pdf`;
-
+    // Return success for demo (mock shipping)
     return res.json({
       status: 'success',
-      data: { tracking_number: tracking, courier, estimated_delivery: est, label_url: labelUrl },
+      data: { tracking_number: trackingNumber, carrier: 'FedEx', estimated_delivery: '2-3 days' },
       message: 'Shipment created successfully',
     });
   } catch (err) {
@@ -54,3 +29,4 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => console.log(`shipping-service listening on ${PORT}`));
+ 

@@ -4,7 +4,8 @@ const { loadWorkflow, validateWorkflow, getReadyTasks, getFailureHandlerTaskIds 
 const repo = require('../db/workflowRepository');
 const { query } = require('../db/index');
 
-const WORKFLOW_DEFINITIONS_DIR = path.join(__dirname, '../../../workflow-definitions');
+// Workflow definitions are bundled inside the orchestrator image under /usr/src/app/workflow-definitions
+const WORKFLOW_DEFINITIONS_DIR = path.join(__dirname, '../../workflow-definitions');
 
 function workflowDefinitionPath(workflowName) {
   return path.join(WORKFLOW_DEFINITIONS_DIR, `${workflowName}.yaml`);
@@ -286,6 +287,26 @@ async function executeTaskDirect(taskInstance, taskDef, workflowInstanceId, work
       await repo.createTaskLog(taskInstance.id, 'INFO', `Task completed. Output: ${JSON.stringify(res.data || {})}`);
       await repo.createWorkflowEvent(workflowInstanceId, 'TASK_COMPLETED', taskDef.id, `Task ${taskDef.name} completed`);
 
+      // If we completed during a retry cycle, mark retry succeeded
+      if (currentRetry > 1) {
+        await repo.createWorkflowEvent(workflowInstanceId, 'RETRY_SUCCEEDED', taskDef.id, `Task ${taskDef.name} succeeded on attempt ${currentRetry}`);
+      }
+
+      // Conditional on_success branching: activate listed successor tasks (best-effort)
+      if (Array.isArray(taskDef.on_success) && taskDef.on_success.length > 0) {
+        const wfAfter = await repo.getWorkflowById(workflowInstanceId);
+        for (const succId of taskDef.on_success) {
+          const succInstance = wfAfter.tasks.find((t) => t.task_id === succId);
+          if (!succInstance) continue;
+          if (succInstance.status === 'PENDING') continue; // already active
+          if (succInstance.status === 'COMPLETED') continue; // already completed
+
+          await repo.updateTaskInstance(succInstance.id, { status: 'PENDING', errorMessage: null });
+          await repo.createTaskLog(succInstance.id, 'INFO', `Activated via on_success branch from ${taskDef.id}`);
+          await repo.createWorkflowEvent(workflowInstanceId, 'BRANCH_TAKEN', succId, `on_success branch taken from ${taskDef.id} -> ${succId}`);
+        }
+      }
+
       // Trigger next tasks
       executeNextTasks(workflowInstanceId, workflowDef).catch((e) => console.error(e));
       return;
@@ -310,19 +331,22 @@ async function executeTaskDirect(taskInstance, taskDef, workflowInstanceId, work
       // Exponential Backoff retry dispatcher
       if (currentRetry < maxAttempts) {
         const exponentialDelay = delaySeconds * Math.pow(backoffMultiplier, currentRetry - 1);
+        // mark as retrying and create retry events
+        await repo.updateTaskInstance(taskInstance.id, { status: 'RETRYING', retryCount: currentRetry });
         await repo.createTaskLog(
           taskInstance.id,
           'INFO',
           `Scheduling retry ${currentRetry + 1}/${maxAttempts} in ${exponentialDelay}s (exponential backoff)`
         );
+        await repo.createWorkflowEvent(workflowInstanceId, 'RETRY_ATTEMPT', taskDef.id, `Retry attempt ${currentRetry + 1}/${maxAttempts} scheduled in ${exponentialDelay}s`);
         await sleep(exponentialDelay * 1000);
         return attemptExecute();
       }
 
-      // Exhausted all retries
-      await repo.updateTaskInstance(taskInstance.id, { status: 'FAILED', completedAt: nowISO() });
-      await repo.createTaskLog(taskInstance.id, 'ERROR', `All ${maxAttempts} retry attempts exhausted. Marking task as FAILED.`);
-      await repo.createWorkflowEvent(workflowInstanceId, 'TASK_FAILED', taskDef.id, `Task ${taskDef.name} permanently failed (Retries exhausted)`);
+      // Exhausted all retries -> mark as max exceeded
+      await repo.updateTaskInstance(taskInstance.id, { status: 'MAX_RETRIES_EXCEEDED', completedAt: nowISO() });
+      await repo.createTaskLog(taskInstance.id, 'ERROR', `All ${maxAttempts} retry attempts exhausted. Marking task as MAX_RETRIES_EXCEEDED.`);
+      await repo.createWorkflowEvent(workflowInstanceId, 'RETRY_FAILED', taskDef.id, `Task ${taskDef.name} retries exhausted (${maxAttempts})`);
 
       // If workflow termination is requested upon task failure
       if (taskDef.on_failure === 'fail_workflow') {
@@ -332,32 +356,39 @@ async function executeTaskDirect(taskInstance, taskDef, workflowInstanceId, work
         return;
       }
 
-      // Compensation / Fallback Jump Targeting
-      const failureTarget = taskDef.on_failure;
-      console.log(`Task ${taskDef.id} failed, jumping to fallback task: ${failureTarget}`);
-      
-      const wf = await repo.getWorkflowById(workflowInstanceId);
-      const targetInstance = wf.tasks.find((t) => t.task_id === failureTarget);
-      if (targetInstance) {
-        if (targetInstance.status === 'COMPLETED') {
-          await repo.updateWorkflowStatus(workflowInstanceId, 'FAILED');
-          executeNextTasks(workflowInstanceId, workflowDef).catch((e) => console.error(e));
-          return;
+      // Compensation / Fallback Jump Targeting (support arrays)
+      const onFailureTargets = Array.isArray(taskDef.on_failure) ? taskDef.on_failure : (taskDef.on_failure ? [taskDef.on_failure] : []);
+      if (onFailureTargets.includes('fail_workflow')) {
+        console.log(`Task ${taskDef.id} failed and will fail workflow ${workflowInstanceId}`);
+        await repo.updateWorkflowStatus(workflowInstanceId, 'FAILED');
+        await repo.createWorkflowEvent(workflowInstanceId, 'WORKFLOW_FAILED', taskDef.id, `Workflow failed: Task ${taskDef.name} permanently failed.`);
+        return;
+      }
+
+      if (onFailureTargets.length > 0) {
+        const wf = await repo.getWorkflowById(workflowInstanceId);
+        for (const failureTarget of onFailureTargets) {
+          const targetInstance = wf.tasks.find((t) => t.task_id === failureTarget);
+          if (!targetInstance) {
+            console.warn(`Failure fallback target ${failureTarget} not found in workflow ${workflowInstanceId}`);
+            continue;
+          }
+          if (targetInstance.status === 'COMPLETED') {
+            // nothing to do, but note the outcome
+            await repo.createTaskLog(targetInstance.id, 'INFO', `Fallback target ${failureTarget} already completed`);
+            continue;
+          }
+
+          await repo.updateTaskInstance(targetInstance.id, { status: 'PENDING', errorMessage: null });
+          await repo.createTaskLog(targetInstance.id, 'INFO', `Activated as compensation/fallback path from failed task ${taskDef.id}`);
+          await repo.createWorkflowEvent(
+            workflowInstanceId,
+            'BRANCH_TAKEN',
+            failureTarget,
+            `on_failure branch taken from ${taskDef.id} -> ${failureTarget}`
+          );
         }
-
-        // Set failure compensation target as PENDING
-        await repo.updateTaskInstance(targetInstance.id, { status: 'PENDING', errorMessage: null });
-        await repo.createTaskLog(targetInstance.id, 'INFO', `Activated as compensation/fallback path from failed task ${taskDef.id}`);
-        await repo.createWorkflowEvent(
-          workflowInstanceId,
-          'TASK_STARTED',
-          failureTarget,
-          `Activated fallback compensation task: ${failureTarget}`
-        );
-
         executeNextTasks(workflowInstanceId, workflowDef).catch((e) => console.error(e));
-      } else {
-        console.warn(`Failure fallback target ${failureTarget} not found in workflow ${workflowInstanceId}`);
       }
     }
   };

@@ -36,6 +36,8 @@ function statusIcon(status) {
   if (status === 'COMPLETED') return '✓';
   if (status === 'FAILED') return '✕';
   if (status === 'RUNNING') return '●';
+  if (status === 'RETRYING') return '↺';
+  if (status === 'MAX_RETRIES_EXCEEDED') return '⚠';
   if (status === 'PAUSED') return '‖';
   return '○';
 }
@@ -186,21 +188,47 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
         }
       });
 
-      // 2. Failure fallback jump arrows (styled dashed red)
-      if (node.onFailure && node.onFailure !== 'fail_workflow') {
-        const failureTarget = nodeMap[node.onFailure];
+      // 1.5 Success branch arrows (conditional success path)
+      if (Array.isArray(node.instance?.output_data) || Array.isArray(node.onSuccess) || node.onSuccess) {
+        // noop: backward compatibility guard
+      }
+      if (Array.isArray((workflow.definition?.tasks || []).find(t=>t.id===node.id)?.on_success)) {
+        const succs = (workflow.definition?.tasks || []).find(t=>t.id===node.id).on_success || [];
+        succs.forEach((succId) => {
+          const target = nodeMap[succId];
+          if (!target) return;
+          let edgeStatus = 'pending';
+          if (node.status === 'COMPLETED') edgeStatus = 'completed';
+          if (node.status === 'RUNNING') edgeStatus = 'active';
+          edges.push({
+            id: `${node.id}-${target.id}-success`,
+            fromX: node.x + 200,
+            fromY: node.y + 40,
+            toX: target.x,
+            toY: target.y + 40,
+            status: edgeStatus,
+            type: 'success',
+          });
+        });
+      }
+
+      // 2. Failure fallback jump arrows (support array targets)
+      const onFailureTargets = Array.isArray(node.onFailure) ? node.onFailure : (node.onFailure ? [node.onFailure] : []);
+      onFailureTargets.forEach((failureTargetId) => {
+        if (!failureTargetId || failureTargetId === 'fail_workflow') return;
+        const failureTarget = nodeMap[failureTargetId];
         if (failureTarget) {
           edges.push({
             id: `${node.id}-${failureTarget.id}-failure`,
-            fromX: node.x + 100,  // bottom center of node
-            fromY: node.y + 80,   // bottom of node
-            toX: failureTarget.x, // left of target node
+            fromX: node.x + 100,
+            fromY: node.y + 80,
+            toX: failureTarget.x,
             toY: failureTarget.y + 40,
             status: node.status === 'FAILED' ? 'failed' : 'pending',
             type: 'failure',
           });
         }
-      }
+      });
     });
 
     return edges;
@@ -282,6 +310,16 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
 
         {/* Real interactive SVG DAG Graph Canvas */}
         <div className="dag-container-outer">
+          <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '0.5rem', alignItems: 'center' }}>
+            <div style={{ display: 'inline-flex', gap: '0.5rem', alignItems: 'center' }}>
+              <span style={{ width: 12, height: 12, background: 'var(--color-success)', borderRadius: 4, display: 'inline-block' }} />
+              <small style={{ color: 'var(--text-secondary)', fontWeight: 700 }}>Success Path</small>
+            </div>
+            <div style={{ display: 'inline-flex', gap: '0.5rem', alignItems: 'center' }}>
+              <span style={{ width: 12, height: 12, background: 'var(--color-failed)', borderRadius: 4, display: 'inline-block' }} />
+              <small style={{ color: 'var(--text-secondary)', fontWeight: 700 }}>Failure Path</small>
+            </div>
+          </div>
           <div className="dag-grid-bg" />
           <div className="dag-canvas">
             
@@ -365,6 +403,11 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
                       <span style={{ color: 'var(--color-warning)', fontWeight: '600', fontSize: '0.75rem' }}>
                         ↺ {node.retryCount}
                       </span>
+                    ) : null}
+                    {node.status === 'RETRYING' ? (
+                      <div style={{ marginLeft: '0.5rem', color: 'var(--color-warning)', fontSize: '0.75rem', fontWeight: 700 }}>
+                        Retrying...
+                      </div>
                     ) : null}
                   </div>
                 </div>
@@ -535,7 +578,7 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
           <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1.15rem', marginBottom: '0.25rem' }}>Audit Trail</h3>
           <p className="page-subtitle" style={{ fontSize: '0.78rem', marginBottom: '1rem' }}>Chronological ledger of orchestration events.</p>
           
-          <div className="audit-timeline" style={{ maxHeight: '350px', overflowY: 'auto' }}>
+            <div className="audit-timeline" style={{ maxHeight: '350px', overflowY: 'auto' }}>
             {events.map((ev) => (
               <div key={ev.id} className={`audit-event-node ${ev.event_type}`}>
                 <span className="audit-event-time">{new Date(ev.created_at).toLocaleTimeString()}</span>
@@ -548,6 +591,9 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
                     {ev.message.length > 80 ? ev.message.slice(0, 80) + '...' : ev.message}
                   </span>
                 ) : null}
+                <div style={{ marginLeft: 'auto' }}>
+                  <span className="status-badge" style={{ background: 'rgba(13,92,70,0.06)', color: 'var(--color-primary)', fontSize: '0.65rem' }}>Event Published</span>
+                </div>
               </div>
             ))}
             {events.length === 0 ? (

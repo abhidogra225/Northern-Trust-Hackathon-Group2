@@ -6,6 +6,8 @@ const cors = require('cors');
 
 const { pool, connect } = require('./db/index');
 const workflowRoutes = require('./routes/workflowRoutes');
+const repo = require('./db/workflowRepository');
+const eventBus = require('./events/eventBus');
 
 const app = express();
 app.use(cors());
@@ -35,11 +37,29 @@ async function ensureSchema() {
   if (!fs.existsSync(schemaPath)) return;
   const sql = fs.readFileSync(schemaPath, 'utf8');
   
-  // Split sql file by semicolon to run statements individually
-  const statements = sql
-    .split(';')
-    .map(stmt => stmt.trim())
-    .filter(stmt => stmt.length > 0);
+  // Split SQL into statements but respect dollar-quoted blocks ($$ ... $$)
+  const statements = [];
+  let buffer = '';
+  let inDollar = false;
+  for (let i = 0; i < sql.length; i++) {
+    const two = sql.slice(i, i + 2);
+    // toggle on $$
+    if (two === '$$') {
+      inDollar = !inDollar;
+      buffer += two;
+      i++; // skip next char as we've consumed two
+      continue;
+    }
+    const ch = sql[i];
+    if (ch === ';' && !inDollar) {
+      const stmt = buffer.trim();
+      if (stmt.length > 0) statements.push(stmt);
+      buffer = '';
+    } else {
+      buffer += ch;
+    }
+  }
+  if (buffer.trim().length > 0) statements.push(buffer.trim());
 
   console.log(`Applying DB schema incrementally (${statements.length} statements)`);
   
@@ -63,6 +83,28 @@ async function start() {
   try {
     await connect();
     console.log('Connected to DB');
+    try {
+      await eventBus.connect();
+      console.log('Connected to Redis event bus');
+    } catch (err) {
+      console.warn('Could not connect to Redis event bus:', err.message || err);
+    }
+    // Subscribe to external events and persist them without re-publishing
+    try {
+      await eventBus.subscribe(async (ev) => {
+        try {
+          // ev expected shape: { type, workflowId, taskId, timestamp, message }
+          if (ev && ev.workflowId) {
+            await repo.createExternalWorkflowEvent(ev.workflowId, ev.type || 'EXTERNAL_EVENT', ev.taskId || null, ev.message ? ev.message : JSON.stringify(ev));
+            console.log('Persisted external event from Redis:', ev.type, ev.workflowId, ev.taskId);
+          }
+        } catch (err) {
+          console.warn('Error persisting external event:', err.message || err);
+        }
+      });
+    } catch (err) {
+      console.warn('Failed to subscribe to Redis event bus:', err.message || err);
+    }
     await ensureSchema();
 
     app.listen(PORT, () => {

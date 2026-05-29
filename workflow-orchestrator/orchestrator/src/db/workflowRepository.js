@@ -1,4 +1,5 @@
 const { query } = require('./index');
+const eventBus = require('../events/eventBus');
 
 /**
  * Create a new workflow instance.
@@ -226,6 +227,23 @@ async function createWorkflowEvent(workflowInstanceId, eventType, taskId = null,
     RETURNING *
   `;
   const res = await query(sql, [workflowInstanceId, eventType, taskId, message]);
+  const inserted = res.rows[0];
+
+  // Attempt to publish the event to the Redis event bus (best-effort)
+  try {
+    const payload = {
+      type: eventType,
+      workflowId: workflowInstanceId,
+      taskId: taskId,
+      message: message,
+      timestamp: new Date().toISOString(),
+      eventId: inserted.id,
+    };
+    await eventBus.publish(payload);
+    console.log('Published event to Redis:', payload.type, payload.workflowId, payload.taskId);
+  } catch (err) {
+    console.warn('Failed to publish event to Redis event bus:', err.message || err);
+  }
   return res.rows[0];
 }
 
@@ -236,6 +254,19 @@ async function getWorkflowEvents(workflowInstanceId) {
   const sql = 'SELECT * FROM workflow_events WHERE workflow_instance_id = $1 ORDER BY created_at ASC';
   const res = await query(sql, [workflowInstanceId]);
   return res.rows;
+}
+
+/**
+ * Persist an external event received via the event bus without re-publishing it.
+ */
+async function createExternalWorkflowEvent(workflowInstanceId, eventType, taskId = null, message = null) {
+  const sql = `
+    INSERT INTO workflow_events (workflow_instance_id, event_type, task_id, message)
+    VALUES ($1, $2, $3, $4)
+    RETURNING *
+  `;
+  const res = await query(sql, [workflowInstanceId, eventType, taskId, message]);
+  return res.rows[0];
 }
 
 /**
@@ -273,5 +304,6 @@ module.exports = {
   getWorkflowEvents,
   createTaskLog,
   getTaskLogs,
+  createExternalWorkflowEvent,
 };
 
