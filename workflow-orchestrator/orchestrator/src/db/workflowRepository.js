@@ -18,14 +18,8 @@ async function createWorkflow(name, inputData) {
 }
 
 const fs = require('fs');
-const path = require('path');
 const yaml = require('js-yaml');
-
-const WORKFLOW_DEFINITIONS_DIR = path.join(__dirname, '../../../workflow-definitions');
-
-function workflowDefinitionPath(workflowName) {
-  return path.join(WORKFLOW_DEFINITIONS_DIR, `${workflowName}.yaml`);
-}
+const { workflowDefinitionPath } = require('../utils/workflowPaths');
 
 /**
  * Get a workflow instance by id, including its task instances and dynamic definition.
@@ -34,12 +28,23 @@ function workflowDefinitionPath(workflowName) {
  */
 async function getWorkflowById(id) {
   const wfRes = await query('SELECT * FROM workflow_instances WHERE id = $1', [id]);
-  const wf = wfRes.rows[0];
-  if (!wf) return null;
-  const tasksRes = await query('SELECT * FROM task_instances WHERE workflow_instance_id = $1 ORDER BY id', [id]);
-  wf.tasks = tasksRes.rows;
+  const row = wfRes.rows[0];
+  if (!row) return null;
 
-  // dynamically load the definition from the YAML file
+  const tasksRes = await query('SELECT * FROM task_instances WHERE workflow_instance_id = $1 ORDER BY id', [id]);
+
+  // Plain object so definition/tasks always serialize in JSON responses
+  const wf = {
+    id: row.id,
+    workflow_name: row.workflow_name,
+    status: row.status,
+    input_data: row.input_data,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    tasks: tasksRes.rows,
+    definition: null,
+  };
+
   try {
     const yamlPath = workflowDefinitionPath(wf.workflow_name);
     if (fs.existsSync(yamlPath)) {
@@ -49,6 +54,7 @@ async function getWorkflowById(id) {
   } catch (err) {
     console.error('Error loading workflow definition inside repository:', err.message);
   }
+
   return wf;
 }
 

@@ -19,6 +19,18 @@ const DEFAULT_COORDS = {
   'send-notification-failure': { x: 400, y: 390 },
 };
 
+/** Fallback when API omits workflow.definition (order-flow). */
+const FALLBACK_ORDER_FLOW_TASKS = [
+  { id: 'validate-order', name: 'Validate Order', depends_on: [], on_failure: 'send-notification-failure' },
+  { id: 'process-payment', name: 'Process Payment', depends_on: ['validate-order'], on_failure: 'send-notification-failure' },
+  { id: 'check-inventory', name: 'Check Inventory', depends_on: ['process-payment'], on_failure: 'fail_workflow' },
+  { id: 'check-fraud', name: 'Check Fraud', depends_on: ['process-payment'], on_failure: 'fail_workflow' },
+  { id: 'create-shipment', name: 'Create Shipment', depends_on: ['check-inventory', 'check-fraud'], on_failure: 'fail_workflow' },
+  { id: 'send-notification-success', name: 'Send Success Notification', depends_on: ['create-shipment'], on_failure: 'fail_workflow' },
+  { id: 'send-notification-failure', name: 'Send Failure Notification', depends_on: [], on_failure: 'fail_workflow' },
+  { id: 'update-order-status', name: 'Update Order Status', depends_on: ['send-notification-success'], on_failure: 'fail_workflow' },
+];
+
 function formatDate(value) {
   if (!value) return '-';
   return new Date(value).toLocaleTimeString() + ' ' + new Date(value).toLocaleDateString();
@@ -39,7 +51,72 @@ function statusIcon(status) {
   if (status === 'RETRYING') return '↺';
   if (status === 'MAX_RETRIES_EXCEEDED') return '⚠';
   if (status === 'PAUSED') return '‖';
+  if (status === 'SKIPPED') return '⊘';
   return '○';
+}
+
+const SUCCESS_PATH_TASK_IDS = new Set([
+  'check-inventory',
+  'check-fraud',
+  'create-shipment',
+  'send-notification-success',
+  'update-order-status',
+]);
+
+function isDepTerminalFailure(depId, instances) {
+  const dep = instances.find((t) => t.task_id === depId);
+  if (!dep) return false;
+  return dep.status === 'FAILED' || dep.status === 'MAX_RETRIES_EXCEEDED';
+}
+
+function depsAllCompleted(deps, instances) {
+  return (deps || []).every((depId) => {
+    const dep = instances.find((t) => t.task_id === depId);
+    return dep?.status === 'COMPLETED';
+  });
+}
+
+/** Map DB task status to what the DAG should show (skipped branches, approval pause, etc.). */
+function getDagDisplayStatus(taskId, instance, workflow, defTask, allInstances) {
+  const raw = instance?.status || 'PENDING';
+  const deps = defTask?.depends_on || [];
+
+  if (instance?.output_data?.awaiting_approval) return 'PAUSED';
+  if (workflow?.status === 'PAUSED' && raw === 'RUNNING' && taskId === 'process-payment') return 'PAUSED';
+
+  if (raw === 'SKIPPED') return 'SKIPPED';
+  if (raw === 'MAX_RETRIES_EXCEEDED') return 'FAILED';
+
+  const failureNotifier = allInstances.find((t) => t.task_id === 'send-notification-failure');
+  const failureBranchRan =
+    failureNotifier?.status === 'COMPLETED' ||
+    (failureNotifier?.status === 'RUNNING' && failureNotifier?.started_at);
+
+  if (SUCCESS_PATH_TASK_IDS.has(taskId) && failureBranchRan && raw === 'PENDING' && !instance?.started_at) {
+    return 'SKIPPED';
+  }
+
+  if (raw === 'PENDING' && !instance?.started_at) {
+    if (deps.some((depId) => isDepTerminalFailure(depId, allInstances))) return 'SKIPPED';
+    if (['FAILED', 'COMPLETED', 'TERMINATED'].includes(workflow?.status) && !depsAllCompleted(deps, allInstances)) {
+      return 'SKIPPED';
+    }
+  }
+
+  if (taskId === 'send-notification-failure' && workflow?.status === 'COMPLETED' && raw === 'SKIPPED') {
+    return 'SKIPPED';
+  }
+
+  if (
+    (taskId === 'send-notification-success' || taskId === 'update-order-status') &&
+    workflow?.status === 'FAILED' &&
+    raw === 'PENDING' &&
+    !instance?.started_at
+  ) {
+    return 'SKIPPED';
+  }
+
+  return raw;
 }
 
 export default function WorkflowDetail({ workflowId, onBack, onPollingStateChange }) {
@@ -126,21 +203,34 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
   // Topological / Coordinate layout computation
   const dagNodes = useMemo(() => {
     if (!workflow) return [];
-    
-    // Get all task definitions inside YAML
-    const defTasks = workflow.definition?.tasks || [];
-    
-    // Convert to map
+
+    const defTasks =
+      workflow.definition?.tasks?.length > 0
+        ? workflow.definition.tasks
+        : workflow.workflow_name === 'order-flow'
+          ? FALLBACK_ORDER_FLOW_TASKS
+          : (workflow.tasks || []).map((t) => ({
+              id: t.task_id,
+              name: t.task_id,
+              depends_on: [],
+              on_failure: 'fail_workflow',
+            }));
+
+    const instances = workflow.tasks || [];
+
     return defTasks.map((t, idx) => {
-      const instance = (workflow.tasks || []).find((x) => x.task_id === t.id);
+      const instance = instances.find((x) => x.task_id === t.id);
       const coords = DEFAULT_COORDS[t.id] || { x: idx * 220 + 50, y: 190 };
-      
+      const rawStatus = instance ? instance.status : 'PENDING';
+      const displayStatus = getDagDisplayStatus(t.id, instance, workflow, t, instances);
+
       return {
         id: t.id,
         name: t.name,
         dependsOn: t.depends_on || [],
         onFailure: t.on_failure,
-        status: instance ? instance.status : 'PENDING',
+        status: displayStatus,
+        rawStatus,
         retryCount: instance ? instance.retry_count : 0,
         x: coords.x,
         y: coords.y,
@@ -172,8 +262,11 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
           if (parent.status === 'RUNNING' && node.status === 'PENDING') {
             edgeStatus = 'active';
           }
-          if (parent.status === 'FAILED') {
-            edgeStatus = 'failed';
+          if (parent.status === 'FAILED' || parent.status === 'SKIPPED') {
+            edgeStatus = parent.status === 'FAILED' ? 'failed' : 'pending';
+          }
+          if (node.status === 'SKIPPED') {
+            edgeStatus = 'pending';
           }
 
           edges.push({
@@ -224,7 +317,12 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
             fromY: node.y + 80,
             toX: failureTarget.x,
             toY: failureTarget.y + 40,
-            status: node.status === 'FAILED' ? 'failed' : 'pending',
+            status:
+              node.status === 'FAILED' || node.rawStatus === 'MAX_RETRIES_EXCEEDED'
+                ? 'failed'
+                : node.status === 'COMPLETED' && failureTarget.status === 'COMPLETED'
+                  ? 'failed'
+                  : 'pending',
             type: 'failure',
           });
         }
@@ -381,6 +479,12 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
                 );
               })}
             </svg>
+
+            {dagNodes.length === 0 ? (
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+                No workflow definition available to render the DAG graph.
+              </div>
+            ) : null}
 
             {/* Absolute positioned interactive Glassmorphic DAG Nodes */}
             {dagNodes.map((node) => (

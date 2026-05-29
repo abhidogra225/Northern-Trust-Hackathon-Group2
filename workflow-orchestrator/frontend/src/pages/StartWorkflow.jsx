@@ -23,7 +23,7 @@ const PRESETS = [
       customerName: 'John Doe',
       email: 'john.doe@example.com',
       phone: '+1 555 010 0000',
-      itemId: 'ITEM-002',
+      itemId: 'ITEM-001',
       quantity: 1,
       amount: '80',
       cardNumber: '4111 2222 3333 0000',

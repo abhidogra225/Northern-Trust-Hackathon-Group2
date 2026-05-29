@@ -4,12 +4,7 @@ const { loadWorkflow, validateWorkflow, getReadyTasks, getFailureHandlerTaskIds 
 const repo = require('../db/workflowRepository');
 const { query } = require('../db/index');
 
-// Workflow definitions are bundled inside the orchestrator image under /usr/src/app/workflow-definitions
-const WORKFLOW_DEFINITIONS_DIR = path.join(__dirname, '../../workflow-definitions');
-
-function workflowDefinitionPath(workflowName) {
-  return path.join(WORKFLOW_DEFINITIONS_DIR, `${workflowName}.yaml`);
-}
+const { workflowDefinitionPath } = require('../utils/workflowPaths');
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -160,7 +155,9 @@ async function executeNextTasks(workflowInstanceId, workflowDef) {
 
   if (toExecute.length === 0) {
     console.log('No ready tasks to execute for', workflowInstanceId);
-    const anyFailed = taskInstances.some((t) => t.status === 'FAILED');
+    const anyFailed = taskInstances.some(
+      (t) => t.status === 'FAILED' || t.status === 'MAX_RETRIES_EXCEEDED'
+    );
     const anyPendingOrRunning = taskInstances.some((t) => ['PENDING', 'RUNNING'].includes(t.status));
 
     // Failure path finished but success-path tasks still waiting on failed deps — close them out
@@ -177,10 +174,16 @@ async function executeNextTasks(workflowInstanceId, workflowDef) {
       return;
     }
 
-    if (!anyFailed && !anyPendingOrRunning) {
-      await repo.updateWorkflowStatus(workflowInstanceId, 'COMPLETED');
-      await repo.createWorkflowEvent(workflowInstanceId, 'WORKFLOW_COMPLETED', null, 'Workflow finished successfully');
-      console.log('Workflow completed', workflowInstanceId);
+    if (!anyPendingOrRunning) {
+      if (!anyFailed) {
+        await repo.updateWorkflowStatus(workflowInstanceId, 'COMPLETED');
+        await repo.createWorkflowEvent(workflowInstanceId, 'WORKFLOW_COMPLETED', null, 'Workflow finished successfully');
+        console.log('Workflow completed', workflowInstanceId);
+      } else if (wf.status === 'RUNNING') {
+        await repo.updateWorkflowStatus(workflowInstanceId, 'FAILED');
+        await repo.createWorkflowEvent(workflowInstanceId, 'WORKFLOW_FAILED', null, 'Workflow failed: task retries exhausted or permanent failure');
+        console.log('Workflow failed (terminal failure, no pending tasks)', workflowInstanceId);
+      }
     }
     return;
   }

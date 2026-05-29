@@ -3,26 +3,53 @@ const app = express();
 app.use(express.json());
 const PORT = process.env.PORT || 4002;
 
-// simple in-memory inventory
 const inventory = {
-  'ITEM-001': 500,
-  'ITEM-002': 500,
-  'ITEM-003': 500,
-  'ITEM-004': 500,
-  'ITEM-005': 500,
+  'ITEM-001': 50,
+  'ITEM-002': 0,
+  'ITEM-003': 100,
+  'ITEM-004': 25,
+  'ITEM-005': 25,
 };
 
 app.post('/execute', (req, res, next) => {
   try {
-    const { taskId, workflowInstanceId, input } = req.body || {};
-    const itemId = (input && input.item_id) || 'ITEM-001';
-    const qty = Number((input && input.quantity) || 1);
+    const { taskId, input } = req.body || {};
+    const itemId = input && input.item_id;
+    const qty = Number((input && input.quantity) || 0);
 
-    // Return success for demo purposes (mock inventory check)
+    if (!itemId || !Object.prototype.hasOwnProperty.call(inventory, itemId)) {
+      return res.json({
+        status: 'failed',
+        data: { reason: 'item_not_found' },
+        message: 'Item not found',
+      });
+    }
+
+    if (taskId === 'validate-order') {
+      return res.json({
+        status: 'success',
+        data: { valid: true, item_id: itemId, available: inventory[itemId] },
+        message: 'Order validated',
+      });
+    }
+
+    if (inventory[itemId] <= 0 || inventory[itemId] < qty) {
+      return res.json({
+        status: 'failed',
+        data: { reason: 'out_of_stock', remaining_stock: inventory[itemId] },
+        message: 'Out of stock',
+      });
+    }
+
+    inventory[itemId] -= qty;
     return res.json({
       status: 'success',
-      data: { reserved_quantity: qty, remaining_stock: 100, warehouse_id: 'WH-1', itemId },
-      message: 'Inventory check passed',
+      data: {
+        reserved_quantity: qty,
+        remaining_stock: inventory[itemId],
+        warehouse_id: 'WH-1',
+      },
+      message: 'Reserved',
     });
   } catch (err) {
     next(err);

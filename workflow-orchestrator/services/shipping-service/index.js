@@ -3,18 +3,48 @@ const app = express();
 app.use(express.json());
 const PORT = process.env.PORT || 4003;
 
+function randomDigits(n) {
+  let s = '';
+  for (let i = 0; i < n; i++) s += Math.floor(Math.random() * 10);
+  return s;
+}
+
 app.post('/execute', async (req, res, next) => {
   try {
-    const { taskId, workflowInstanceId, input } = req.body || {};
-    await new Promise((r) => setTimeout(r, 500));
+    const { input, retryCount } = req.body || {};
+    await new Promise((r) => setTimeout(r, 300));
 
-    const trackingNumber = `TRACK-${Math.random().toString(36).substring(7).toUpperCase()}`;
+    const address = String((input && input.address) || '');
+    if (!address) {
+      return res.json({
+        status: 'failed',
+        data: { reason: 'missing_address' },
+        message: 'Address missing',
+      });
+    }
 
-    // Return success for demo (mock shipping)
+    const simulateFailure = address.toUpperCase().includes('FAIL');
+    if (simulateFailure && (retryCount || 0) < 1) {
+      return res.json({
+        status: 'failed',
+        data: { reason: 'carrier_pickup_failed', attempt: (retryCount || 0) + 1 },
+        message: 'Carrier pickup failed — will retry',
+      });
+    }
+
+    const tracking = `TRK-${randomDigits(8)}`;
+    const couriers = ['FedEx', 'UPS', 'DHL', 'BlueDart'];
+    const courier = couriers[Math.floor(Math.random() * couriers.length)];
+
     return res.json({
       status: 'success',
-      data: { tracking_number: trackingNumber, carrier: 'FedEx', estimated_delivery: '2-3 days' },
-      message: 'Shipment created successfully',
+      data: {
+        tracking_number: tracking,
+        courier,
+        estimated_delivery: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+        label_url: `https://labels.example.com/${tracking}.pdf`,
+      },
+      message: 'Shipment created',
     });
   } catch (err) {
     next(err);
@@ -29,4 +59,3 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => console.log(`shipping-service listening on ${PORT}`));
- 
