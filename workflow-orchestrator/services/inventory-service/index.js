@@ -3,13 +3,20 @@ const app = express();
 app.use(express.json());
 const PORT = process.env.PORT || 4002;
 
-const inventory = {
-  'ITEM-001': 50,
+/** Generous stock for repeated demo runs without service restart. */
+const INITIAL_INVENTORY = {
+  'ITEM-001': 10000,
   'ITEM-002': 0,
-  'ITEM-003': 100,
-  'ITEM-004': 25,
-  'ITEM-005': 25,
+  'ITEM-003': 10000,
+  'ITEM-004': 5000,
+  'ITEM-005': 5000,
 };
+
+const inventory = { ...INITIAL_INVENTORY };
+
+function stockFor(itemId) {
+  return Object.prototype.hasOwnProperty.call(inventory, itemId) ? inventory[itemId] : null;
+}
 
 app.post('/execute', (req, res, next) => {
   try {
@@ -17,7 +24,7 @@ app.post('/execute', (req, res, next) => {
     const itemId = input && input.item_id;
     const qty = Number((input && input.quantity) || 0);
 
-    if (!itemId || !Object.prototype.hasOwnProperty.call(inventory, itemId)) {
+    if (!itemId || stockFor(itemId) === null) {
       return res.json({
         status: 'failed',
         data: { reason: 'item_not_found' },
@@ -25,18 +32,42 @@ app.post('/execute', (req, res, next) => {
       });
     }
 
+    if (qty <= 0) {
+      return res.json({
+        status: 'failed',
+        data: { reason: 'invalid_quantity' },
+        message: 'Quantity must be greater than zero',
+      });
+    }
+
+    const available = inventory[itemId];
+
     if (taskId === 'validate-order') {
+      if (available <= 0) {
+        return res.json({
+          status: 'failed',
+          data: { reason: 'out_of_stock', remaining_stock: available },
+          message: 'Item out of stock',
+        });
+      }
+      if (available < qty) {
+        return res.json({
+          status: 'failed',
+          data: { reason: 'insufficient_stock', remaining_stock: available, requested: qty },
+          message: 'Insufficient stock for order quantity',
+        });
+      }
       return res.json({
         status: 'success',
-        data: { valid: true, item_id: itemId, available: inventory[itemId] },
+        data: { valid: true, item_id: itemId, available, requested: qty },
         message: 'Order validated',
       });
     }
 
-    if (inventory[itemId] <= 0 || inventory[itemId] < qty) {
+    if (available <= 0 || available < qty) {
       return res.json({
         status: 'failed',
-        data: { reason: 'out_of_stock', remaining_stock: inventory[itemId] },
+        data: { reason: 'out_of_stock', remaining_stock: available },
         message: 'Out of stock',
       });
     }
@@ -56,7 +87,16 @@ app.post('/execute', (req, res, next) => {
   }
 });
 
-app.get('/health', (req, res) => res.json({ service: 'inventory-service', status: 'healthy', port: PORT }));
+app.post('/admin/reset-inventory', (req, res) => {
+  Object.keys(INITIAL_INVENTORY).forEach((key) => {
+    inventory[key] = INITIAL_INVENTORY[key];
+  });
+  res.json({ status: 'success', data: inventory, message: 'Inventory reset to initial levels' });
+});
+
+app.get('/health', (req, res) =>
+  res.json({ service: 'inventory-service', status: 'healthy', port: PORT, inventory })
+);
 
 app.use((err, req, res, next) => {
   console.error('inventory-service error', err);

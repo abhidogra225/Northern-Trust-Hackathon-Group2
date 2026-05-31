@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   getWorkflowById,
   pauseWorkflow,
@@ -8,16 +8,26 @@ import {
   getWorkflowEvents,
 } from '../services/api';
 
+/** Logical DAG canvas size — scaled to fit the viewport via CSS transform. */
+const DAG_DESIGN_WIDTH = 1270;
+const DAG_DESIGN_HEIGHT = 410;
+const DAG_NODE_WIDTH = 180;
+const DAG_NODE_HEIGHT = 80;
+
 const DEFAULT_COORDS = {
-  'validate-order': { x: 50, y: 190 },
-  'process-payment': { x: 280, y: 190 },
-  'check-inventory': { x: 520, y: 90 },
-  'check-fraud': { x: 520, y: 290 },
-  'create-shipment': { x: 760, y: 190 },
-  'send-notification-success': { x: 990, y: 190 },
-  'update-order-status': { x: 1220, y: 190 },
-  'send-notification-failure': { x: 400, y: 390 },
+  'validate-order': { x: 20, y: 160 },
+  'process-payment': { x: 230, y: 160 },
+  'check-inventory': { x: 440, y: 70 },
+  'check-fraud': { x: 440, y: 250 },
+  'create-shipment': { x: 650, y: 160 },
+  'send-notification-success': { x: 860, y: 160 },
+  'update-order-status': { x: 1070, y: 160 },
+  'send-notification-failure': { x: 230, y: 320 },
 };
+
+function dagNodeCenterY(y) {
+  return y + DAG_NODE_HEIGHT / 2;
+}
 
 /** Fallback when API omits workflow.definition (order-flow). */
 const FALLBACK_ORDER_FLOW_TASKS = [
@@ -126,6 +136,8 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
   const [error, setError] = useState('');
   const [actionError, setActionError] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
+  const [dagScale, setDagScale] = useState(1);
+  const dagViewportRef = useRef(null);
 
   useEffect(() => {
     let mounted = true;
@@ -160,6 +172,29 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
     };
   }, [workflowId, onPollingStateChange]);
 
+  useEffect(() => {
+    const el = dagViewportRef.current;
+    if (!el) return undefined;
+
+    const updateScale = () => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      if (w <= 0 || h <= 0) return;
+      // Keep graph highly visible and prominent with a minimum scale factor of 0.9 to prevent excessive scroll while keeping it large
+      const scale = Math.max(0.9, Math.min(w / DAG_DESIGN_WIDTH, h / DAG_DESIGN_HEIGHT, 1.45));
+      setDagScale(scale);
+    };
+
+    updateScale();
+    const observer = new ResizeObserver(updateScale);
+    observer.observe(el);
+    window.addEventListener('resize', updateScale);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateScale);
+    };
+  }, [workflow]);
+
   async function runControlAction(actionFn) {
     setActionLoading(true);
     setActionError('');
@@ -185,11 +220,23 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
     // Get definition details
     const definition = (workflow.definition?.tasks || []).find((t) => t.id === selectedTaskId);
     
+    const defTask =
+      (workflow.definition?.tasks || FALLBACK_ORDER_FLOW_TASKS).find((t) => t.id === selectedTaskId) ||
+      { depends_on: [] };
+    const displayStatus = getDagDisplayStatus(
+      selectedTaskId,
+      instance,
+      workflow,
+      defTask,
+      workflow.tasks || []
+    );
+
     return {
       taskId: selectedTaskId,
       name: definition?.name || selectedTaskId,
       serviceUrl: definition?.service_url || '-',
-      status: instance ? instance.status : 'PENDING',
+      status: displayStatus,
+      rawStatus: instance ? instance.status : 'PENDING',
       startedAt: instance?.started_at,
       completedAt: instance?.completed_at,
       retryCount: instance?.retry_count || 0,
@@ -220,7 +267,7 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
 
     return defTasks.map((t, idx) => {
       const instance = instances.find((x) => x.task_id === t.id);
-      const coords = DEFAULT_COORDS[t.id] || { x: idx * 220 + 50, y: 190 };
+      const coords = DEFAULT_COORDS[t.id] || { x: idx * 140 + 8, y: 100 };
       const rawStatus = instance ? instance.status : 'PENDING';
       const displayStatus = getDagDisplayStatus(t.id, instance, workflow, t, instances);
 
@@ -271,10 +318,10 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
 
           edges.push({
             id: `${parent.id}-${node.id}`,
-            fromX: parent.x + 200, // right side of node
-            fromY: parent.y + 40,  // center of node
-            toX: node.x,          // left side of node
-            toY: node.y + 40,      // center of node
+            fromX: parent.x + DAG_NODE_WIDTH,
+            fromY: dagNodeCenterY(parent.y),
+            toX: node.x,
+            toY: dagNodeCenterY(node.y),
             status: edgeStatus,
             type: 'dependency',
           });
@@ -295,10 +342,10 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
           if (node.status === 'RUNNING') edgeStatus = 'active';
           edges.push({
             id: `${node.id}-${target.id}-success`,
-            fromX: node.x + 200,
-            fromY: node.y + 40,
+            fromX: node.x + DAG_NODE_WIDTH,
+            fromY: dagNodeCenterY(node.y),
             toX: target.x,
-            toY: target.y + 40,
+            toY: dagNodeCenterY(target.y),
             status: edgeStatus,
             type: 'success',
           });
@@ -313,10 +360,10 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
         if (failureTarget) {
           edges.push({
             id: `${node.id}-${failureTarget.id}-failure`,
-            fromX: node.x + 100,
-            fromY: node.y + 80,
-            toX: failureTarget.x,
-            toY: failureTarget.y + 40,
+            fromX: node.x + DAG_NODE_WIDTH / 2,
+            fromY: node.y + DAG_NODE_HEIGHT,
+            toX: failureTarget.x + DAG_NODE_WIDTH / 2,
+            toY: failureTarget.y,
             status:
               node.status === 'FAILED' || node.rawStatus === 'MAX_RETRIES_EXCEEDED'
                 ? 'failed'
@@ -358,20 +405,21 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
     );
   }
 
+  const scaledW = DAG_DESIGN_WIDTH * dagScale;
+  const scaledH = DAG_DESIGN_HEIGHT * dagScale;
+
   return (
-    <div className="page" style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: '2rem', minHeight: '80vh' }}>
-      
-      {/* Left Column: DAG Graph + Details Inspector */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-        
-        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-          <button type="button" className="action-btn secondary" onClick={onBack}>
+    <div className="page workflow-detail-page">
+      <div className="workflow-detail-main">
+        <div className="workflow-detail-header">
+          <button type="button" className="action-btn secondary workflow-back-btn" onClick={onBack}>
             ← Back
           </button>
-          <div>
-            <h2 style={{ fontFamily: 'var(--font-display)', fontSize: '1.75rem' }}>Workflow Orchestration Graph</h2>
-            <p className="page-subtitle">Real-time dependency resolution and parallel worker orchestration pipeline.</p>
+          <div className="workflow-detail-title">
+            <h2>Workflow graph</h2>
+            <p className="page-subtitle">Live task status across the order pipeline</p>
           </div>
+          <span className={`status-badge ${workflow.status} workflow-header-status`}>{workflow.status}</span>
         </div>
 
         {/* Human Approval Alert Notice Banner */}
@@ -406,23 +454,32 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
           </div>
         ) : null}
 
-        {/* Real interactive SVG DAG Graph Canvas */}
         <div className="dag-container-outer">
-          <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '0.5rem', alignItems: 'center' }}>
-            <div style={{ display: 'inline-flex', gap: '0.5rem', alignItems: 'center' }}>
-              <span style={{ width: 12, height: 12, background: 'var(--color-success)', borderRadius: 4, display: 'inline-block' }} />
-              <small style={{ color: 'var(--text-secondary)', fontWeight: 700 }}>Success Path</small>
-            </div>
-            <div style={{ display: 'inline-flex', gap: '0.5rem', alignItems: 'center' }}>
-              <span style={{ width: 12, height: 12, background: 'var(--color-failed)', borderRadius: 4, display: 'inline-block' }} />
-              <small style={{ color: 'var(--text-secondary)', fontWeight: 700 }}>Failure Path</small>
-            </div>
+          <div className="dag-legend">
+            <span className="dag-legend-item">
+              <span className="dag-legend-swatch success" /> Success
+            </span>
+            <span className="dag-legend-item">
+              <span className="dag-legend-swatch failed" /> Failure
+            </span>
           </div>
-          <div className="dag-grid-bg" />
-          <div className="dag-canvas">
-            
-            {/* SVG Connections overlay layer */}
-            <svg className="dag-svg-overlay">
+          <div className="dag-viewport" ref={dagViewportRef}>
+            <div className="dag-scaled-box" style={{ width: scaledW, height: scaledH }}>
+              <div
+                className="dag-stage"
+                style={{
+                  width: DAG_DESIGN_WIDTH,
+                  height: DAG_DESIGN_HEIGHT,
+                  transform: `scale(${dagScale})`,
+                }}
+              >
+                <div className="dag-grid-bg" />
+                <svg
+                  className="dag-svg-overlay"
+                  width={DAG_DESIGN_WIDTH}
+                  height={DAG_DESIGN_HEIGHT}
+                  viewBox={`0 0 ${DAG_DESIGN_WIDTH} ${DAG_DESIGN_HEIGHT}`}
+                >
               <defs>
                 <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
                   <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" />
@@ -480,126 +537,118 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
               })}
             </svg>
 
-            {dagNodes.length === 0 ? (
-              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-                No workflow definition available to render the DAG graph.
-              </div>
-            ) : null}
+                {dagNodes.length === 0 ? (
+                  <div className="dag-empty-msg">No workflow definition available to render the DAG graph.</div>
+                ) : null}
 
-            {/* Absolute positioned interactive Glassmorphic DAG Nodes */}
-            {dagNodes.map((node) => (
-              <div
-                key={node.id}
-                className="dag-node-wrapper"
-                style={{ left: `${node.x}px`, top: `${node.y}px` }}
-                onClick={() => setSelectedTaskId(node.id)}
-              >
-                <div className={`dag-node ${node.status}`}>
-                  <div className="dag-node-title" title={node.name}>
-                    {node.name}
-                  </div>
-                  <div className="dag-node-sub">{node.id}</div>
-                  <div className="dag-node-footer">
-                    <span className={`status-badge ${node.status}`} style={{ fontSize: '0.62rem', padding: '0.2rem 0.4rem', minWidth: 'auto' }}>
-                      {statusIcon(node.status)} {node.status}
-                    </span>
-                    {node.retryCount > 0 ? (
-                      <span style={{ color: 'var(--color-warning)', fontWeight: '600', fontSize: '0.75rem' }}>
-                        ↺ {node.retryCount}
-                      </span>
-                    ) : null}
-                    {node.status === 'RETRYING' ? (
-                      <div style={{ marginLeft: '0.5rem', color: 'var(--color-warning)', fontSize: '0.75rem', fontWeight: 700 }}>
-                        Retrying...
+                {dagNodes.map((node) => (
+                  <div
+                    key={node.id}
+                    className={`dag-node-wrapper ${selectedTaskId === node.id ? 'selected' : ''}`}
+                    style={{ left: `${node.x}px`, top: `${node.y}px`, width: DAG_NODE_WIDTH }}
+                    onClick={() => setSelectedTaskId(node.id)}
+                  >
+                    <div className={`dag-node ${node.status}`}>
+                      <div className="dag-node-title" title={node.name}>
+                        {node.name}
                       </div>
-                    ) : null}
+                      <div className="dag-node-footer">
+                        <span className={`status-badge ${node.status} dag-node-badge`}>
+                          {statusIcon(node.status)} {node.status}
+                        </span>
+                        {node.retryCount > 0 ? (
+                          <span className="dag-retry-count">↺ {node.retryCount}</span>
+                        ) : null}
+                      </div>
+                    </div>
                   </div>
-                </div>
+                ))}
               </div>
-            ))}
-
+            </div>
           </div>
+          <p className="dag-hint muted">Click any node in the graph to inspect task inputs/outputs ↓</p>
         </div>
 
-        {/* Selected Task details drawer inspector */}
         {selectedTaskDetails ? (
-          <div className="task-details-overlay">
-            <div className="task-details-header">
-              <div>
-                <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1.25rem', color: '#fff' }}>
-                  Inspector: {selectedTaskDetails.name}
-                </h3>
-                <p className="dag-node-sub" style={{ fontSize: '0.78rem' }}>Task ID: {selectedTaskDetails.taskId}</p>
+          <div className="task-details-card">
+            <div className="task-details-card-header">
+              <div className="title-area">
+                <h3>{selectedTaskDetails.name}</h3>
+                <span className="mono subtitle">{selectedTaskDetails.taskId}</span>
               </div>
-              <span className={`status-badge ${selectedTaskDetails.status}`}>
-                {statusIcon(selectedTaskDetails.status)} {selectedTaskDetails.status}
-              </span>
+              <button
+                type="button"
+                className="close-btn"
+                onClick={() => setSelectedTaskId(null)}
+                aria-label="Close inspector"
+              >
+                ✕
+              </button>
             </div>
 
-            <div className="task-details-grid">
-              <div>
-                <p className="detail-label">Downstream service url</p>
-                <p style={{ fontSize: '0.9rem', color: 'var(--text-primary)' }} className="mono">{selectedTaskDetails.serviceUrl}</p>
-              </div>
-              <div>
-                <p className="detail-label">Started / Duration</p>
-                <p style={{ fontSize: '0.9rem', color: 'var(--text-primary)' }}>
-                  {formatDate(selectedTaskDetails.startedAt)} ({getDuration(selectedTaskDetails.startedAt, selectedTaskDetails.completedAt)})
-                </p>
-              </div>
-              <div>
-                <p className="detail-label">Retries captured</p>
-                <p style={{ fontSize: '0.9rem', color: 'var(--text-primary)', fontWeight: '600' }}>
-                  {selectedTaskDetails.retryCount} attempts
-                </p>
-              </div>
-              {selectedTaskDetails.errorMessage ? (
-                <div style={{ gridColumn: '1 / -1' }}>
-                  <p className="detail-label" style={{ color: 'var(--color-failed)' }}>Permanent error message</p>
-                  <p className="error-text" style={{ fontSize: '0.9rem', fontWeight: '500' }}>
-                    {selectedTaskDetails.errorMessage}
-                  </p>
+            <div className="task-details-card-body">
+              <div className="meta-column">
+                <div className="meta-row">
+                  <span className="label">Status</span>
+                  <span className={`status-badge ${selectedTaskDetails.status}`}>
+                    {statusIcon(selectedTaskDetails.status)} {selectedTaskDetails.status}
+                  </span>
                 </div>
-              ) : null}
-            </div>
+                
+                <div className="meta-row-grid">
+                  <div>
+                    <span className="label">Duration</span>
+                    <span className="val">{getDuration(selectedTaskDetails.startedAt, selectedTaskDetails.completedAt)}</span>
+                  </div>
+                  <div>
+                    <span className="label">Retries</span>
+                    <span className="val">{selectedTaskDetails.retryCount}</span>
+                  </div>
+                </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
-              <div>
-                <p className="detail-label">Task inputs payload</p>
-                <pre className="json-block compact">{JSON.stringify(selectedTaskDetails.inputData || {}, null, 2)}</pre>
+                {selectedTaskDetails.errorMessage ? (
+                  <div className="error-box">
+                    <span className="label">Error</span>
+                    <span className="error-text">{selectedTaskDetails.errorMessage}</span>
+                  </div>
+                ) : null}
+
+                {(selectedTaskDetails.status === 'FAILED' || selectedTaskDetails.rawStatus === 'MAX_RETRIES_EXCEEDED') ? (
+                  <button
+                    type="button"
+                    className="action-btn retry-btn"
+                    onClick={() => runControlAction(() => retryTask(selectedTaskDetails.instanceId))}
+                    disabled={actionLoading}
+                  >
+                    ↺ Retry task
+                  </button>
+                ) : null}
               </div>
-              <div>
-                <p className="detail-label">Task outputs response</p>
-                <pre className="json-block compact">{JSON.stringify(selectedTaskDetails.outputData || {}, null, 2)}</pre>
+
+              <div className="payload-column">
+                <div className="payload-grids">
+                  <div className="payload-block">
+                    <span className="label">Input Data</span>
+                    <pre className="json-block task-json-preview">
+                      {JSON.stringify(selectedTaskDetails.inputData || {}, null, 2)}
+                    </pre>
+                  </div>
+                  <div className="payload-block">
+                    <span className="label">Output Data</span>
+                    <pre className="json-block task-json-preview">
+                      {JSON.stringify(selectedTaskDetails.outputData || {}, null, 2)}
+                    </pre>
+                  </div>
+                </div>
               </div>
             </div>
-
-            {selectedTaskDetails.status === 'FAILED' ? (
-              <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'flex-end' }}>
-                <button
-                  type="button"
-                  className="action-btn"
-                  onClick={() => runControlAction(() => retryTask(selectedTaskDetails.instanceId))}
-                  disabled={actionLoading}
-                >
-                  ↺ Manually retry failed task
-                </button>
-              </div>
-            ) : null}
           </div>
-        ) : (
-          <p className="muted" style={{ textAlign: 'center', background: 'rgba(255,255,255,0.01)', padding: '1rem', border: '1px dashed var(--border-muted)', borderRadius: '12px' }}>
-            💡 Click on any DAG node to inspect its runtime payloads, task logs, retries, and errors.
-          </p>
-        )}
-
+        ) : null}
       </div>
 
-      {/* Right Column: Workflow Control Actions + Audit Timeline */}
-      <div style={{ borderLeft: '1px solid var(--border-muted)', paddingLeft: '2rem', display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-        
-        {/* Workflow Overview header */}
-        <div className="card" style={{ padding: '1.25rem' }}>
+      <aside className="workflow-detail-aside">
+
+        <div className="card workflow-status-card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.85rem' }}>
             <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', fontWeight: '700', textTransform: 'uppercase' }}>Workflow status</span>
             <span className={`status-badge ${workflow.status}`}>{workflow.status}</span>
@@ -621,7 +670,7 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span className="muted">Failed:</span>
               <span style={{ color: 'var(--color-failed)', fontWeight: '600' }}>
-                {workflow.tasks?.filter((t) => t.status === 'FAILED').length || 0}
+                {workflow.tasks?.filter((t) => t.status === 'FAILED' || t.status === 'MAX_RETRIES_EXCEEDED').length || 0}
               </span>
             </div>
           </div>
@@ -682,7 +731,7 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
           <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1.15rem', marginBottom: '0.25rem' }}>Audit Trail</h3>
           <p className="page-subtitle" style={{ fontSize: '0.78rem', marginBottom: '1rem' }}>Chronological ledger of orchestration events.</p>
           
-            <div className="audit-timeline" style={{ maxHeight: '350px', overflowY: 'auto' }}>
+            <div className="audit-timeline audit-timeline-compact">
             {events.map((ev) => (
               <div key={ev.id} className={`audit-event-node ${ev.event_type}`}>
                 <span className="audit-event-time">{new Date(ev.created_at).toLocaleTimeString()}</span>
@@ -706,8 +755,7 @@ export default function WorkflowDetail({ workflowId, onBack, onPollingStateChang
           </div>
         </div>
 
-      </div>
-
+      </aside>
     </div>
   );
 }

@@ -32,7 +32,7 @@ const PRESETS = [
   },
   {
     name: '‖ Human Approval Step',
-    description: 'Amount > 10,000 pauses payment for human approval, letting you resume it manually in the detail view.',
+    description: 'Amount > $10,000 pauses payment for human approval. After you approve in the detail view, the full order completes successfully.',
     data: {
       customerName: 'Rich Buyer',
       email: 'rich@example.com',

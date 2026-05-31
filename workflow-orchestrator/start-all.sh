@@ -88,6 +88,8 @@ main() {
   start_service "frontend" "${ROOT_DIR}/frontend" "npm run dev"
 
   sleep 3
+  log "Resetting demo inventory levels..."
+  curl -sf -X POST http://127.0.0.1:4002/admin/reset-inventory >/dev/null 2>&1 || true
   log "Opening frontend in browser..."
   if command -v open >/dev/null 2>&1; then
     open "http://localhost:5173" || true

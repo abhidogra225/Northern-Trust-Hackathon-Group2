@@ -158,3 +158,31 @@ node testRun.js
 4. **Frontend shows API errors**
    - Confirm orchestrator is running on port `3000`
    - Refresh after services are fully started
+
+---
+
+## Verify all demo scenarios (before review)
+
+With orchestrator + mock services running:
+
+```bash
+cd orchestrator
+npm run test:scenarios
+```
+
+This runs all four presets end-to-end:
+
+| Scenario | Expected result |
+|---|---|
+| Success | `COMPLETED` — full green path |
+| Card Declined | `FAILED` — payment exhausted, failure notification sent |
+| Human Approval | `PAUSED` → auto-resume → `COMPLETED` |
+| Shipping Retry | `COMPLETED` — shipment succeeds on retry |
+
+All four must show **PASS ✓** in the summary.
+
+Reset demo inventory manually if needed:
+
+```bash
+curl -X POST http://127.0.0.1:4002/admin/reset-inventory
+```

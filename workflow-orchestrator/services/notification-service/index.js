@@ -6,12 +6,37 @@ const PORT = process.env.PORT || 4004;
 app.post('/execute', (req, res, next) => {
   try {
     const { taskId, workflowInstanceId, input } = req.body || {};
-    const type = input && input.notification_type;
-    const email = input && input.customer_email;
+    const email = (input && input.customer_email) || (input && input.email) || 'unknown@example.com';
+    const customerName = (input && input.customer_name) || 'Customer';
 
-    console.log('Notification service: would send', { type, email, workflowInstanceId });
+    let channel = 'order_update';
+    let subject = 'Order update';
 
-    return res.json({ status: 'success', data: { email_sent: true, sms_sent: true, recipient: email }, message: 'Notification queued' });
+    if (taskId === 'send-notification-success') {
+      channel = 'order_success';
+      subject = `Order confirmed — thank you, ${customerName}`;
+    } else if (taskId === 'send-notification-failure') {
+      channel = 'order_failure';
+      subject = `Order could not be completed — ${customerName}`;
+    } else if (taskId === 'update-order-status') {
+      channel = 'order_status_finalized';
+      subject = `Final order status recorded — ${customerName}`;
+    }
+
+    console.log('Notification sent', { taskId, channel, email, workflowInstanceId });
+
+    return res.json({
+      status: 'success',
+      data: {
+        channel,
+        subject,
+        email_sent: true,
+        sms_sent: Boolean(input && input.customer_phone),
+        recipient: email,
+        workflow_instance_id: workflowInstanceId,
+      },
+      message: 'Notification delivered',
+    });
   } catch (err) {
     next(err);
   }
